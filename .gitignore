@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Audio output (don't commit large audio files)
+stems/
+resynth/
+output.wav
+output.mp3
+autotuned.wav
+*.wav
+*.mp3
+*.flac
+
+# But keep test fixtures
+!tests/fixtures/*.wav
+
+# SoundFonts (large binary files)
+soundfonts/*.sf2
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Torch model cache
+.cache/
+pretrained/
