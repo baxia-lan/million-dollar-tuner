@@ -62,7 +62,6 @@ def _separate_demucs(
 ) -> StemResult:
     """Separate using Demucs neural network."""
     import torch
-    import torchaudio
     from demucs.apply import apply_model
     from demucs.pretrained import get_model
 
@@ -76,12 +75,25 @@ def _separate_demucs(
     model.to(device)
     model.eval()
 
-    waveform, sample_rate = torchaudio.load(str(audio_path))
+    # Load audio with soundfile/librosa (works everywhere, no torchcodec needed)
+    import librosa
+    suffix = audio_path.suffix.lower()
+    if suffix == ".mp3":
+        # soundfile can't read MP3, use librosa
+        audio_np, sample_rate = librosa.load(str(audio_path), sr=None, mono=False)
+        if audio_np.ndim == 1:
+            audio_np = np.stack([audio_np, audio_np])
+    else:
+        audio_np, sample_rate = sf.read(str(audio_path), dtype="float32", always_2d=True)
+        audio_np = audio_np.T  # (samples, channels) -> (channels, samples)
+    waveform = torch.from_numpy(audio_np)
 
+    # Resample to model's sample rate if needed
     if sample_rate != model.samplerate:
-        waveform = torchaudio.functional.resample(
-            waveform, sample_rate, model.samplerate
+        resampled = librosa.resample(
+            waveform.numpy(), orig_sr=sample_rate, target_sr=model.samplerate
         )
+        waveform = torch.from_numpy(resampled)
 
     # Ensure stereo
     if waveform.shape[0] == 1:
