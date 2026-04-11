@@ -60,6 +60,12 @@ def align_vocals(
     user_chroma = chroma_features(user_analysis, sr=ANALYSIS_SR, hop_length=HOP_LENGTH)
     ref_chroma = chroma_features(ref_analysis, sr=ANALYSIS_SR, hop_length=HOP_LENGTH)
 
+    # Replace NaN/zero columns to avoid cosine distance producing NaN
+    # (silent frames have zero energy -> zero chroma -> NaN cosine)
+    for C in (user_chroma, ref_chroma):
+        bad = np.isnan(C).any(axis=0) | (np.sum(np.abs(C), axis=0) < 1e-10)
+        C[:, bad] = 1e-10
+
     # Run DTW
     _D, wp = librosa.sequence.dtw(
         X=user_chroma, Y=ref_chroma, metric="cosine"
