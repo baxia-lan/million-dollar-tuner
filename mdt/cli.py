@@ -28,8 +28,6 @@ def main():
 @click.argument("suno_song", type=click.Path(exists=True))
 @click.option("-o", "--output", default="output.wav",
               help="Output file path (WAV or MP3).")
-@click.option("--blend", default=0.8, type=float,
-              help="Timbre blend: 0.0=keep original voice, 1.0=full your voice.")
 @click.option("--reverb-room", default=0.3, type=float,
               help="Reverb room size [0.0–1.0].")
 @click.option("--reverb-wet", default=0.15, type=float,
@@ -44,7 +42,7 @@ def main():
               help="Torch device (cuda/cpu/auto).")
 @click.option("--stems-dir", default=None, type=click.Path(),
               help="Directory to save separated stems.")
-def tune(user_vocals, suno_song, output, blend,
+def tune(user_vocals, suno_song, output,
          reverb_room, reverb_wet, vocal_gain, no_effects,
          model, device, stems_dir):
     """Replace SUNO vocal timbre with your voice.
@@ -69,7 +67,6 @@ def tune(user_vocals, suno_song, output, blend,
         user_vocals_path=user_vocals,
         suno_song_path=suno_song,
         output_path=output,
-        blend=blend,
         apply_effects=not no_effects,
         reverb_room=reverb_room,
         reverb_wet=reverb_wet,

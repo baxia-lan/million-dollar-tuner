@@ -38,7 +38,6 @@ def run_vocal_replacement(
     user_vocals_path: str | Path,
     suno_song_path: str | Path,
     output_path: str | Path = "output.wav",
-    blend: float = 0.8,
     apply_effects: bool = True,
     reverb_room: float = 0.3,
     reverb_wet: float = 0.15,
@@ -94,12 +93,11 @@ def run_vocal_replacement(
     click.echo(f"  User voice sample: {len(user_audio_hq)/OUTPUT_SR:.1f}s")
 
     # ── Step 3: Voice timbre transfer ──────────────────────────
-    click.echo(f"\n[Step 3/4] Transferring your voice timbre (blend={blend:.0%})...")
+    click.echo(f"\n[Step 3/4] Replacing vocal timbre with your voice...")
     converted_vocals = convert_voice_timbre(
         suno_vocals=ref_vocals_hq,
         user_audio=user_audio_hq,
         sr=OUTPUT_SR,
-        blend=blend,
     )
 
     # Quick sanity check: is the output silent?

@@ -36,7 +36,6 @@ def convert_voice_timbre(
     n_fft: int = 2048,
     hop_length: int = 512,
     order: int = 20,
-    blend: float = 0.8,
 ) -> np.ndarray:
     """Replace SUNO vocal timbre with user's timbre.
 
@@ -52,8 +51,6 @@ def convert_voice_timbre(
         Cepstral order. Controls how much detail the envelope captures.
         Lower = smoother envelope = more dramatic timbre change.
         20 is good for voice conversion (captures ~5 formants).
-    blend : float
-        0.0 = keep original SUNO voice, 1.0 = full user timbre.
 
     Returns
     -------
@@ -94,11 +91,8 @@ def convert_voice_timbre(
         suno_env = _cepstral_envelope(log_suno[:, i], order)
         residual = log_suno[:, i] - suno_env  # pitch harmonics
 
-        # Blend between SUNO envelope and user envelope
-        new_env = (1.0 - blend) * suno_env + blend * user_avg_env
-
-        # Recombine: user timbre + SUNO pitch
-        log_output[:, i] = new_env + residual
+        # Replace SUNO's envelope with user's envelope entirely
+        log_output[:, i] = user_avg_env + residual
 
     # Convert back to magnitude
     new_mag = np.exp(log_output)
