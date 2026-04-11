@@ -4,16 +4,9 @@ Source-filter model:
 - Source (excitation: pitch harmonics + timing) → keep from SUNO
 - Filter (vocal tract: formants + timbre) → take from USER
 
-Algorithm:
-1. Compute STFT of SUNO vocals
-2. Separate each frame into spectral envelope (timbre) and residual (pitch)
-3. Compute average spectral envelope from user's voice
-4. Replace SUNO's envelope with user's envelope, keep SUNO's residual
-5. Reconstruct
-
-The key: residual = magnitude / envelope captures the harmonic peaks
-(pitch). Replacing the envelope changes WHICH frequencies are emphasized
-(timbre), without moving the harmonic peaks (pitch stays the same).
+Only transfers the spectral SHAPE (relative peaks/valleys), not
+the absolute volume. Uses per-frame energy normalization to guarantee
+output volume matches input volume exactly.
 """
 
 from __future__ import annotations
@@ -39,65 +32,63 @@ def convert_voice_timbre(
 ) -> np.ndarray:
     """Replace SUNO vocal timbre with user's timbre.
 
-    Parameters
-    ----------
-    suno_vocals : np.ndarray
-        Separated SUNO vocal track (mono).
-    user_audio : np.ndarray
-        User's voice recording (mono).
-    sr : int
-        Sample rate.
-    order : int
-        Cepstral order. Controls how much detail the envelope captures.
-        Lower = smoother envelope = more dramatic timbre change.
-        20 is good for voice conversion (captures ~5 formants).
-
-    Returns
-    -------
-    np.ndarray
-        Vocals with user's timbre, same length/pitch/timing as input.
+    For each SUNO frame:
+      1. Extract envelope and residual (pitch harmonics)
+      2. Replace envelope shape with user's shape
+      3. Force output frame energy = input frame energy (no volume change)
+      4. Recombine with original phase
     """
     import librosa
 
-    # ── Extract user's average timbre (log-domain envelope) ────
+    # ── Extract user's average spectral shape ──────────────────
     S_user = librosa.stft(user_audio, n_fft=n_fft, hop_length=hop_length)
     mag_user = np.abs(S_user)
 
-    # Only use loud frames
+    # Only loud frames
     frame_energy = np.sum(mag_user ** 2, axis=0)
-    threshold = np.median(frame_energy)
-    loud = frame_energy > threshold
+    loud = frame_energy > np.median(frame_energy)
     if np.sum(loud) < 5:
         loud = np.ones(mag_user.shape[1], dtype=bool)
 
-    # Average log-envelope across loud frames
-    log_user_mag = np.log(np.maximum(mag_user[:, loud], 1e-10))
-    user_envelopes = np.zeros_like(log_user_mag)
-    for i in range(log_user_mag.shape[1]):
-        user_envelopes[:, i] = _cepstral_envelope(log_user_mag[:, i], order)
-    user_avg_env = np.mean(user_envelopes, axis=1)  # (n_freq,)
+    log_user = np.log(np.maximum(mag_user[:, loud], 1e-10))
+    user_shapes = np.zeros_like(log_user)
+    for i in range(log_user.shape[1]):
+        env = _cepstral_envelope(log_user[:, i], order)
+        user_shapes[:, i] = env - np.mean(env)  # zero-mean shape
+    user_shape = np.mean(user_shapes, axis=1)
+    # Re-center
+    user_shape -= np.mean(user_shape)
 
-    # ── Process SUNO vocals frame by frame ─────────────────────
+    # ── Process SUNO vocals ────────────────────────────────────
     S_suno = librosa.stft(suno_vocals, n_fft=n_fft, hop_length=hop_length)
     mag_suno = np.abs(S_suno)
     phase_suno = np.angle(S_suno)
 
     log_suno = np.log(np.maximum(mag_suno, 1e-10))
     n_freq, n_frames = log_suno.shape
-    log_output = np.zeros_like(log_suno)
+    new_mag = np.zeros_like(mag_suno)
 
     for i in range(n_frames):
-        # Separate this frame into envelope + residual
         suno_env = _cepstral_envelope(log_suno[:, i], order)
-        residual = log_suno[:, i] - suno_env  # pitch harmonics
+        residual = log_suno[:, i] - suno_env
 
-        # Replace SUNO's envelope with user's envelope entirely
-        log_output[:, i] = user_avg_env + residual
+        # Replace shape: suno_level + user_shape + residual
+        suno_level = np.mean(suno_env)
+        log_frame = suno_level + user_shape + residual
+        new_mag[:, i] = np.exp(log_frame)
 
-    # Convert back to magnitude
-    new_mag = np.exp(log_output)
+    # ── Per-frame energy normalization ─────────────────────────
+    # This is the critical step: force each frame's energy to match
+    # the original exactly. This guarantees:
+    # - Output is never silent (energy is preserved)
+    # - Output is never clipping (energy doesn't explode)
+    # - Only the spectral DISTRIBUTION changes, not the level
+    orig_energy = np.sum(mag_suno ** 2, axis=0) + 1e-20
+    new_energy = np.sum(new_mag ** 2, axis=0) + 1e-20
+    scale = np.sqrt(orig_energy / new_energy)
+    new_mag *= scale[np.newaxis, :]
 
-    # Reconstruct with SUNO's original phase
+    # Reconstruct
     S_out = new_mag * np.exp(1j * phase_suno)
     out = librosa.istft(S_out, hop_length=hop_length, length=len(suno_vocals))
 
