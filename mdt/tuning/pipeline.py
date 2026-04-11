@@ -127,7 +127,12 @@ def run_vocal_replacement(
     instrumental, inst_sr = combine_stems(stems.instrumental_paths, sr=OUTPUT_SR)
     original_mix_hq, _ = load_audio(suno_song_path, sr=OUTPUT_SR, mono=True)
 
-    click.echo(f"\n  User voice sample: {len(user_audio_hq)/OUTPUT_SR:.1f}s")
+    # Master the instrumental stems (also cleans up any AI watermarks)
+    from mdt.audio.mastering import master_audio
+    click.echo("\n  Mastering instrumental stems...")
+    instrumental, inst_sr = master_audio(instrumental, inst_sr, target_sr=OUTPUT_SR)
+
+    click.echo(f"  User voice sample: {len(user_audio_hq)/OUTPUT_SR:.1f}s")
 
     # ── Iterative refinement loop ──────────────────────────────
     params = _TuneParams(
@@ -224,6 +229,7 @@ def run_vocal_replacement(
         params = _adjust_params(params, report)
 
     # ── Save the best result ───────────────────────────────────
+    best_mix, best_sr = master_audio(best_mix, best_sr, target_sr=OUTPUT_SR)
     save_audio(output_path, best_mix, best_sr)
     click.echo(f"\n  Final output saved: {output_path}")
     click.echo(f"  Best parameters: {best_params}")
