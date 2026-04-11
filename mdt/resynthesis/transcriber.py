@@ -64,7 +64,8 @@ def _transcribe_monophonic(
     pitch_curve = detect_pitch(y, sr)
     rhythm = analyze_rhythm(y, sr)
 
-    midi = pretty_midi.PrettyMIDI(initial_tempo=rhythm.tempo)
+    tempo = rhythm.tempo if rhythm.tempo > 0 else 120.0
+    midi = pretty_midi.PrettyMIDI(initial_tempo=tempo)
     program = 0 if name == "vocals" else 33  # Acoustic bass
     instrument = pretty_midi.Instrument(
         program=program,
@@ -132,7 +133,8 @@ def _transcribe_drums(
     - Crash: 49 (Crash Cymbal 1)
     """
     rhythm = analyze_rhythm(y, sr)
-    midi = pretty_midi.PrettyMIDI(initial_tempo=rhythm.tempo)
+    tempo = rhythm.tempo if rhythm.tempo > 0 else 120.0
+    midi = pretty_midi.PrettyMIDI(initial_tempo=tempo)
     drum_inst = pretty_midi.Instrument(
         program=0,
         is_drum=True,
@@ -204,7 +206,8 @@ def _transcribe_chords(
     is an unsolved problem.
     """
     rhythm = analyze_rhythm(y, sr)
-    midi = pretty_midi.PrettyMIDI(initial_tempo=rhythm.tempo)
+    tempo = rhythm.tempo if rhythm.tempo > 0 else 120.0
+    midi = pretty_midi.PrettyMIDI(initial_tempo=tempo)
     instrument = pretty_midi.Instrument(
         program=0,  # Acoustic Grand Piano
         name="other",

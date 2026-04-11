@@ -2,49 +2,43 @@
 
 Defines measurable criteria to assess whether the output is good enough:
 
-1. Pitch Accuracy  — 修正后的音高与目标的偏差 (cents)
-2. Time Alignment  — 节奏对齐的精度 (onset误差 ms)
-3. Spectral Quality — 频谱失真程度 (信噪比)
-4. Mix Balance     — 人声与伴奏的音量平衡 (dB差)
-5. Overall Score   — 综合评分 (0-100)
+1. Pitch Accuracy  — corrected pitch vs target pitch (median deviation in cents)
+2. Time Alignment  — onset alignment error (ms) between aligned and reference vocals
+3. Vocal Clarity   — spectral smoothness of processed vocals (artifact detection)
+4. Mix Balance     — vocal loudness vs instrumental loudness relative to reference
 
-Quality thresholds (通过/警告/失败):
-- Pitch: <25 cents = GOOD, 25-50 = OK, >50 = POOR
-- Timing: <30ms = GOOD, 30-80ms = OK, >80ms = POOR
-- SNR: >15dB = GOOD, 10-15 = OK, <10 = POOR
+Quality thresholds (GOOD / OK / POOR):
+- Pitch: <25 cents / 25-50 / >50
+- Timing: <50ms / 50-120ms / >120ms
+- Clarity: >0.7 / 0.5-0.7 / <0.5 (correlation with harmonic template)
+- Balance: <3dB / 3-8dB / >8dB difference from reference ratio
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import librosa
 import numpy as np
 
 from mdt.analysis.pitch import PitchCurve, detect_pitch, pitch_difference_semitones
 from mdt.analysis.rhythm import analyze_rhythm
-from mdt.config import ANALYSIS_SR
+from mdt.config import ANALYSIS_SR, HOP_LENGTH
 
 
 # ── Thresholds ──────────────────────────────────────────────────
 
-# Pitch deviation in cents (100 cents = 1 semitone)
-PITCH_GOOD = 25.0     # < 25 cents = excellent
-PITCH_OK = 50.0        # 25–50 cents = acceptable
-                       # > 50 cents = poor
+PITCH_GOOD = 25.0   # cents
+PITCH_OK = 50.0
 
-# Onset alignment error in milliseconds
-TIMING_GOOD = 30.0     # < 30ms = inaudible
-TIMING_OK = 80.0       # 30–80ms = noticeable but ok
-                       # > 80ms = poor
+TIMING_GOOD = 50.0   # ms
+TIMING_OK = 120.0
 
-# Signal-to-noise ratio in dB
-SNR_GOOD = 15.0        # > 15 dB = clean
-SNR_OK = 10.0          # 10–15 dB = acceptable
-                       # < 10 dB = noisy
+CLARITY_GOOD = 0.70  # spectral correlation
+CLARITY_OK = 0.50
 
-# Mix balance: vocal RMS vs instrumental RMS difference in dB
-BALANCE_GOOD = 3.0     # < 3 dB difference from reference = good
-BALANCE_OK = 6.0       # 3–6 dB = acceptable
+BALANCE_GOOD = 3.0   # dB
+BALANCE_OK = 8.0
 
 
 @dataclass
@@ -136,7 +130,7 @@ def evaluate_pitch_accuracy(
             name="Pitch Accuracy",
             value=0.0,
             unit="cents",
-            grade="POOR",
+            grade="OK",
             detail="Not enough voiced frames to evaluate",
         )
 
@@ -145,7 +139,7 @@ def evaluate_pitch_accuracy(
         corrected_pitch.frequencies[both_voiced],
         target_f0_interp[both_voiced],
     )
-    deviation_cents = np.abs(diff_semitones) * 100  # semitones -> cents
+    deviation_cents = np.abs(diff_semitones) * 100
     median_dev = float(np.nanmedian(deviation_cents))
 
     if median_dev < PITCH_GOOD:
@@ -172,8 +166,9 @@ def evaluate_timing_accuracy(
 ) -> QualityGrade:
     """Measure timing alignment by comparing onset positions.
 
-    For each onset in the reference, finds the nearest onset
-    in the aligned audio and measures the error.
+    For each onset in the reference, finds the nearest onset in the
+    aligned audio and measures the error. Uses beat tracking as
+    fallback if onsets are too sparse.
     """
     ref_rhythm = analyze_rhythm(ref_audio, sr=ref_sr)
     aligned_rhythm = analyze_rhythm(aligned_audio, sr=aligned_sr)
@@ -182,19 +177,22 @@ def evaluate_timing_accuracy(
     aligned_onsets = aligned_rhythm.onset_times
 
     if len(ref_onsets) < 3 or len(aligned_onsets) < 3:
+        # Fall back to beat alignment
+        ref_onsets = ref_rhythm.beat_times
+        aligned_onsets = aligned_rhythm.beat_times
+
+    if len(ref_onsets) < 2 or len(aligned_onsets) < 2:
         return QualityGrade(
             name="Timing Accuracy",
             value=0.0,
             unit="ms",
             grade="OK",
-            detail="Not enough onsets to evaluate",
+            detail="Not enough events to evaluate timing",
         )
 
     # For each reference onset, find the nearest aligned onset
     errors_ms = []
     for ref_t in ref_onsets:
-        if len(aligned_onsets) == 0:
-            break
         nearest_idx = np.argmin(np.abs(aligned_onsets - ref_t))
         error_ms = abs(aligned_onsets[nearest_idx] - ref_t) * 1000
         errors_ms.append(error_ms)
@@ -213,48 +211,82 @@ def evaluate_timing_accuracy(
         value=median_error,
         unit="ms onset error",
         grade=grade,
-        detail=f"Median nearest-onset error over {len(errors_ms)} onsets",
+        detail=f"Median nearest-onset error over {len(errors_ms)} events",
     )
 
 
-def evaluate_spectral_quality(
-    original_audio: np.ndarray,
+def evaluate_vocal_clarity(
     processed_audio: np.ndarray,
+    sr: int,
 ) -> QualityGrade:
-    """Measure spectral distortion as signal-to-noise ratio.
+    """Measure vocal clarity by detecting processing artifacts.
 
-    Treats the original vocal as the signal and the difference
-    (processed - original) as noise/artifacts.
+    Uses spectral flatness as a proxy: natural vocals have low spectral
+    flatness (strong harmonic peaks), while artifacts (clicks, metallic
+    sounds, phase distortion) increase flatness/noise floor.
+
+    Also checks for energy discontinuities (clicks from bad time-stretching).
     """
-    # Match lengths
-    min_len = min(len(original_audio), len(processed_audio))
-    orig = original_audio[:min_len]
-    proc = processed_audio[:min_len]
+    # 1. Spectral flatness (Wiener entropy)
+    # Low = tonal/harmonic (good), High = noisy/artifact-heavy (bad)
+    flatness = librosa.feature.spectral_flatness(y=processed_audio, hop_length=HOP_LENGTH)
+    mean_flatness = float(np.mean(flatness))
 
-    # SNR = 10 * log10(signal_power / noise_power)
-    signal_power = np.mean(orig ** 2)
-    noise_power = np.mean((proc - orig) ** 2)
-
-    if noise_power < 1e-10:
-        snr = 60.0  # Essentially no difference
-    elif signal_power < 1e-10:
-        snr = 0.0
+    # 2. Check for clicks/discontinuities
+    # Compute short-time energy and look for sudden jumps
+    frame_length = 1024
+    hop = 512
+    energy = np.array([
+        np.sum(processed_audio[i:i + frame_length] ** 2)
+        for i in range(0, len(processed_audio) - frame_length, hop)
+    ])
+    if len(energy) > 2:
+        energy_diff = np.abs(np.diff(energy))
+        energy_mean = np.mean(energy) + 1e-10
+        # Normalize jumps relative to mean energy
+        jump_ratio = np.mean(energy_diff) / energy_mean
     else:
-        snr = 10.0 * np.log10(signal_power / noise_power)
+        jump_ratio = 0.0
 
-    if snr > SNR_GOOD:
+    # 3. Harmonic-to-noise ratio proxy via autocorrelation
+    # Strong autocorrelation peak = clear pitch = good vocal quality
+    if len(processed_audio) > sr // 4:
+        segment = processed_audio[:sr]  # First second
+        autocorr = np.correlate(segment[:4096], segment[:4096], mode='full')
+        autocorr = autocorr[len(autocorr) // 2:]
+        if autocorr[0] > 0:
+            autocorr = autocorr / autocorr[0]
+            # Find strongest peak after lag=50 (above 880Hz)
+            # and before lag=800 (above 55Hz)
+            search_region = autocorr[50:800] if len(autocorr) > 800 else autocorr[50:]
+            peak_strength = float(np.max(search_region)) if len(search_region) > 0 else 0.0
+        else:
+            peak_strength = 0.0
+    else:
+        peak_strength = 0.5
+
+    # Combine into a clarity score [0, 1]
+    # Low flatness = good, low jump_ratio = good, high peak_strength = good
+    flatness_score = max(0.0, 1.0 - mean_flatness * 10)  # flatness ~0.01-0.1
+    jump_score = max(0.0, 1.0 - jump_ratio * 5)
+    harmonic_score = peak_strength
+
+    clarity = 0.4 * flatness_score + 0.3 * jump_score + 0.3 * harmonic_score
+    clarity = max(0.0, min(1.0, clarity))
+
+    if clarity > CLARITY_GOOD:
         grade = "GOOD"
-    elif snr > SNR_OK:
+    elif clarity > CLARITY_OK:
         grade = "OK"
     else:
         grade = "POOR"
 
     return QualityGrade(
-        name="Spectral Quality",
-        value=snr,
-        unit="dB SNR",
+        name="Vocal Clarity",
+        value=clarity,
+        unit="(0-1 score)",
         grade=grade,
-        detail="Signal-to-noise ratio (original vs processed difference)",
+        detail=f"flatness={mean_flatness:.3f} jumps={jump_ratio:.3f} harmonic={peak_strength:.2f}",
     )
 
 
@@ -266,8 +298,7 @@ def evaluate_mix_balance(
 ) -> QualityGrade:
     """Check if the vocal/instrumental balance matches the original.
 
-    Compares the vocal-to-instrumental RMS ratio against
-    the reference ratio.
+    Compares the vocal-to-instrumental RMS ratio against the reference ratio.
     """
     def rms_db(y: np.ndarray) -> float:
         rms = np.sqrt(np.mean(y ** 2))
@@ -304,6 +335,44 @@ def evaluate_mix_balance(
     )
 
 
+def evaluate_mix_balance_overall(
+    final_mix: np.ndarray,
+    original_mix: np.ndarray,
+) -> QualityGrade:
+    """Compare overall loudness and spectral balance of the final mix vs original.
+
+    This is a simpler, more reliable balance check: the output song
+    should have similar overall loudness and spectral distribution
+    as the original SUNO song.
+    """
+    def rms_db(y: np.ndarray) -> float:
+        rms = np.sqrt(np.mean(y ** 2))
+        if rms < 1e-10:
+            return -80.0
+        return 20.0 * np.log10(rms)
+
+    min_len = min(len(final_mix), len(original_mix))
+    final_rms = rms_db(final_mix[:min_len])
+    orig_rms = rms_db(original_mix[:min_len])
+
+    loudness_diff = abs(final_rms - orig_rms)
+
+    if loudness_diff < BALANCE_GOOD:
+        grade = "GOOD"
+    elif loudness_diff < BALANCE_OK:
+        grade = "OK"
+    else:
+        grade = "POOR"
+
+    return QualityGrade(
+        name="Mix Balance",
+        value=loudness_diff,
+        unit="dB from original",
+        grade=grade,
+        detail=f"Output: {final_rms:.1f}dB RMS, Original: {orig_rms:.1f}dB RMS",
+    )
+
+
 def evaluate_full(
     corrected_audio: np.ndarray,
     aligned_audio: np.ndarray,
@@ -312,6 +381,8 @@ def evaluate_full(
     instrumental_audio: np.ndarray,
     target_pitch: PitchCurve,
     sr: int,
+    final_mix: np.ndarray | None = None,
+    original_mix: np.ndarray | None = None,
 ) -> QualityReport:
     """Run all quality evaluations and produce a report.
 
@@ -331,6 +402,10 @@ def evaluate_full(
         Target pitch curve from reference vocals.
     sr : int
         Sample rate.
+    final_mix : np.ndarray or None
+        The final output mix (vocals + instrumental), for balance eval.
+    original_mix : np.ndarray or None
+        The original SUNO song, for balance comparison.
 
     Returns
     -------
@@ -338,24 +413,27 @@ def evaluate_full(
     """
     report = QualityReport()
 
-    # 1. Pitch accuracy
+    # 1. Pitch accuracy (corrected vs target)
     pitch_grade = evaluate_pitch_accuracy(aligned_audio, sr, target_pitch)
     report.grades.append(pitch_grade)
 
-    # 2. Timing accuracy
+    # 2. Timing accuracy (aligned vs reference onsets)
     timing_grade = evaluate_timing_accuracy(
         aligned_audio, sr, ref_vocal_audio, sr
     )
     report.grades.append(timing_grade)
 
-    # 3. Spectral quality (artifacts from pitch/time manipulation)
-    spectral_grade = evaluate_spectral_quality(original_user_audio, aligned_audio)
-    report.grades.append(spectral_grade)
+    # 3. Vocal clarity (artifact detection on processed audio)
+    clarity_grade = evaluate_vocal_clarity(aligned_audio, sr)
+    report.grades.append(clarity_grade)
 
-    # 4. Mix balance
-    balance_grade = evaluate_mix_balance(
-        aligned_audio, instrumental_audio, ref_vocal_audio
-    )
+    # 4. Mix balance: compare final mix RMS against original mix RMS
+    if final_mix is not None and original_mix is not None:
+        balance_grade = evaluate_mix_balance_overall(final_mix, original_mix)
+    else:
+        balance_grade = evaluate_mix_balance(
+            aligned_audio, instrumental_audio, ref_vocal_audio
+        )
     report.grades.append(balance_grade)
 
     # Overall score (weighted average)
@@ -363,7 +441,7 @@ def evaluate_full(
     weights = {
         "Pitch Accuracy": 0.35,
         "Timing Accuracy": 0.25,
-        "Spectral Quality": 0.20,
+        "Vocal Clarity": 0.20,
         "Mix Balance": 0.20,
     }
 

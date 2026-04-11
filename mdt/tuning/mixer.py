@@ -71,6 +71,10 @@ def mix_vocals_with_instrumental(
         )
         vocals = apply_effects(vocals, sr, board=board)
 
+    # Flatten instrumental to mono if it's a single-channel 2D array
+    if instrumental.ndim == 2 and instrumental.shape[0] == 1:
+        instrumental = instrumental[0]
+
     # Ensure matching length
     if instrumental.ndim == 1:
         # Mono instrumental

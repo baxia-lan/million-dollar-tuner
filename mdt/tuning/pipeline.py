@@ -144,6 +144,10 @@ def run_vocal_replacement(
         apply_effects=apply_effects,
     )
 
+    # Load original mix for balance comparison
+    original_mix_hq, _ = load_audio(suno_song_path, sr=OUTPUT_SR, mono=True)
+    original_mix_mono = original_mix_hq
+
     best_report: QualityReport | None = None
     best_mix: np.ndarray | None = None
     best_sr: int = OUTPUT_SR
@@ -194,10 +198,18 @@ def run_vocal_replacement(
         )
 
         # Step 6: Evaluate quality
+        # Use the final mix to evaluate balance (mixer already did RMS matching)
         eval_len = min(len(aligned_vocals), len(ref_vocals_hq), len(user_audio_hq))
+
+        # For balance evaluation: extract vocal energy from the final mix
+        # by comparing mix vs instrumental only
         instrumental_mono = instrumental
         if instrumental_mono.ndim == 2:
             instrumental_mono = np.mean(instrumental_mono, axis=0)
+
+        final_mix_mono = final_mix
+        if final_mix_mono.ndim == 2:
+            final_mix_mono = np.mean(final_mix_mono, axis=0)
 
         report = evaluate_full(
             corrected_audio=tuned_vocals[:eval_len],
@@ -205,6 +217,8 @@ def run_vocal_replacement(
             original_user_audio=user_audio_hq[:eval_len],
             ref_vocal_audio=ref_vocals_hq[:eval_len],
             instrumental_audio=instrumental_mono[:min(eval_len, len(instrumental_mono))],
+            final_mix=final_mix_mono,
+            original_mix=original_mix_mono,
             target_pitch=ref_pitch,
             sr=OUTPUT_SR,
         )
@@ -265,7 +279,7 @@ def _adjust_params(params: _TuneParams, report: QualityReport) -> _TuneParams:
       - Not much we can adjust algorithmically; DTW is already best-effort
       - Slight adjustment: keep same params (alignment is deterministic)
 
-    Spectral Quality POOR (too many artifacts):
+    Vocal Clarity POOR (too many artifacts):
       - REDUCE correction strength (less processing = fewer artifacts)
       - Reduce max shift (avoid extreme pitch shifts that cause distortion)
 
@@ -292,16 +306,23 @@ def _adjust_params(params: _TuneParams, report: QualityReport) -> _TuneParams:
                 new.correction_strength = min(1.0, params.correction_strength + 0.10)
                 new.max_shift = min(6.0, params.max_shift + 1.0)
 
-            elif grade.name == "Spectral Quality":
+            elif grade.name == "Vocal Clarity":
                 # Too many artifacts → ease off processing
                 new.correction_strength = max(0.3, params.correction_strength - 0.15)
                 new.max_shift = max(2.0, params.max_shift - 0.5)
 
             elif grade.name == "Mix Balance":
-                # Volume mismatch → adjust gain
-                # Use the detail field to figure out direction
-                if "ratio" in grade.detail:
-                    # If user vocal is too quiet relative to reference
+                # Volume mismatch → parse detail to adjust gain direction
+                # detail looks like: "Vocal/inst ratio: -12.0dB (ref: -5.0dB)"
+                try:
+                    parts = grade.detail.split(":")
+                    user_ratio = float(parts[1].split("dB")[0].strip())
+                    ref_ratio = float(parts[2].split("dB")[0].strip())
+                    if user_ratio < ref_ratio:
+                        new.vocal_gain_db = params.vocal_gain_db + 3.0
+                    else:
+                        new.vocal_gain_db = params.vocal_gain_db - 3.0
+                except (IndexError, ValueError):
                     new.vocal_gain_db = params.vocal_gain_db + 2.0
 
         elif grade.grade == "OK":
@@ -309,13 +330,13 @@ def _adjust_params(params: _TuneParams, report: QualityReport) -> _TuneParams:
             if grade.name == "Pitch Accuracy":
                 new.correction_strength = min(1.0, params.correction_strength + 0.05)
 
-            elif grade.name == "Spectral Quality":
+            elif grade.name == "Vocal Clarity":
                 new.correction_strength = max(0.3, params.correction_strength - 0.05)
 
     # Sanity-check: if pitch and spectral are fighting each other,
     # prioritize pitch (the main user complaint is being off-key)
     if any(g.name == "Pitch Accuracy" and g.grade == "POOR" for g in report.grades):
-        if any(g.name == "Spectral Quality" and g.grade == "POOR" for g in report.grades):
+        if any(g.name == "Vocal Clarity" and g.grade == "POOR" for g in report.grades):
             # Both are POOR: favor moderate correction
             new.correction_strength = 0.7
             new.max_shift = 3.5

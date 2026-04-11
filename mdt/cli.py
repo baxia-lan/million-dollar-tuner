@@ -378,8 +378,8 @@ def evaluate(result_vocals, reference_song, stems_dir, model, device):
     from mdt.config import ANALYSIS_SR, OUTPUT_SR
     from mdt.evaluation import (
         evaluate_pitch_accuracy,
-        evaluate_spectral_quality,
         evaluate_timing_accuracy,
+        evaluate_vocal_clarity,
     )
     from mdt.separation.separator import separate as do_separate
 
@@ -422,13 +422,13 @@ def evaluate(result_vocals, reference_song, stems_dir, model, device):
     )
     click.echo(str(timing_grade))
 
-    click.echo("  Evaluating spectral quality...")
-    spectral_grade = evaluate_spectral_quality(ref_audio, result_audio)
-    click.echo(str(spectral_grade))
+    click.echo("  Evaluating vocal clarity...")
+    clarity_grade = evaluate_vocal_clarity(result_audio, OUTPUT_SR)
+    click.echo(str(clarity_grade))
 
     # Overall
     grade_scores = {"GOOD": 100, "OK": 65, "POOR": 25}
-    grades = [pitch_grade, timing_grade, spectral_grade]
+    grades = [pitch_grade, timing_grade, clarity_grade]
     avg = sum(grade_scores[g.grade] for g in grades) / len(grades)
 
     click.echo("\n  " + "─" * 40)
