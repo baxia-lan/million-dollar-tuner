@@ -46,9 +46,11 @@ def main():
               help="Torch device (cuda/cpu/auto).")
 @click.option("--stems-dir", default=None, type=click.Path(),
               help="Directory to save separated stems.")
+@click.option("--max-iterations", default=4, type=int,
+              help="Max refinement iterations if quality is below standard.")
 def tune(user_vocals, suno_song, output, strength, max_shift,
          reverb_room, reverb_wet, vocal_gain, no_effects,
-         model, device, stems_dir):
+         model, device, stems_dir, max_iterations):
     """Replace SUNO vocals with your own tuned voice.
 
     USER_VOCALS is your singing recording (WAV/MP3).
@@ -77,6 +79,7 @@ def tune(user_vocals, suno_song, output, strength, max_shift,
         demucs_model=model,
         device=device,
         stems_dir=stems_dir,
+        max_iterations=max_iterations,
     )
 
 
@@ -340,6 +343,102 @@ def _key_to_scale(root: str, mode: str) -> list[str]:
 
     intervals = major_intervals if mode == "major" else minor_intervals
     return [all_notes[(root_idx + i) % 12] for i in intervals]
+
+
+# ────────────────────────────────────────────────────────────────
+# mdt evaluate — Quality evaluation
+# ────────────────────────────────────────────────────────────────
+
+@main.command()
+@click.argument("result_vocals", type=click.Path(exists=True))
+@click.argument("reference_song", type=click.Path(exists=True))
+@click.option("--stems-dir", default=None, type=click.Path(),
+              help="Directory containing pre-separated stems.")
+@click.option("--model", default="htdemucs_ft",
+              help="Demucs model (if stems need to be separated).")
+@click.option("--device", default=None,
+              help="Torch device.")
+def evaluate(result_vocals, reference_song, stems_dir, model, device):
+    """Evaluate the quality of a vocal replacement result.
+
+    Compare your processed vocals against the reference song to get
+    a quality score with specific metrics.
+
+    RESULT_VOCALS is your tuned/processed vocal file.
+    REFERENCE_SONG is the original SUNO song.
+
+    Example:
+
+        mdt evaluate my_tuned_vocals.wav suno_song.mp3
+    """
+    import numpy as np
+
+    from mdt.analysis.pitch import detect_pitch
+    from mdt.audio.io import load_audio
+    from mdt.config import ANALYSIS_SR, OUTPUT_SR
+    from mdt.evaluation import (
+        evaluate_pitch_accuracy,
+        evaluate_spectral_quality,
+        evaluate_timing_accuracy,
+    )
+    from mdt.separation.separator import separate as do_separate
+
+    click.echo("=" * 60)
+    click.echo("  Million Dollar Tuner — Quality Evaluation")
+    click.echo("=" * 60)
+
+    # Separate reference song to get reference vocals
+    if stems_dir is None:
+        click.echo("\n  Separating reference song...")
+        stems = do_separate(
+            audio_path=reference_song,
+            output_dir="eval_stems",
+            model_name=model,
+            device=device,
+        )
+        ref_vocals_path = stems.vocals_path
+    else:
+        from pathlib import Path
+        ref_vocals_path = Path(stems_dir) / "vocals.wav"
+        if not ref_vocals_path.exists():
+            click.echo(f"  ERROR: {ref_vocals_path} not found.")
+            return
+
+    # Load audio
+    result_audio, _ = load_audio(result_vocals, sr=OUTPUT_SR, mono=True)
+    ref_audio, _ = load_audio(ref_vocals_path, sr=OUTPUT_SR, mono=True)
+
+    # Detect reference pitch
+    ref_analysis, _ = load_audio(ref_vocals_path, sr=ANALYSIS_SR, mono=True)
+    ref_pitch = detect_pitch(ref_analysis, sr=ANALYSIS_SR)
+
+    click.echo("\n  Evaluating pitch accuracy...")
+    pitch_grade = evaluate_pitch_accuracy(result_audio, OUTPUT_SR, ref_pitch)
+    click.echo(str(pitch_grade))
+
+    click.echo("  Evaluating timing accuracy...")
+    timing_grade = evaluate_timing_accuracy(
+        result_audio, OUTPUT_SR, ref_audio, OUTPUT_SR
+    )
+    click.echo(str(timing_grade))
+
+    click.echo("  Evaluating spectral quality...")
+    spectral_grade = evaluate_spectral_quality(ref_audio, result_audio)
+    click.echo(str(spectral_grade))
+
+    # Overall
+    grade_scores = {"GOOD": 100, "OK": 65, "POOR": 25}
+    grades = [pitch_grade, timing_grade, spectral_grade]
+    avg = sum(grade_scores[g.grade] for g in grades) / len(grades)
+
+    click.echo("\n  " + "─" * 40)
+    click.echo(f"  Overall Score: {avg:.0f}/100")
+
+    if all(g.grade != "POOR" for g in grades):
+        click.echo("  Result: PASSED")
+    else:
+        click.echo("  Result: NEEDS IMPROVEMENT")
+        click.echo("  Tip: Try --strength 0.9 or re-record closer to the melody.")
 
 
 if __name__ == "__main__":
