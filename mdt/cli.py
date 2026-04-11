@@ -44,11 +44,9 @@ def main():
               help="Torch device (cuda/cpu/auto).")
 @click.option("--stems-dir", default=None, type=click.Path(),
               help="Directory to save separated stems.")
-@click.option("--max-iterations", default=4, type=int,
-              help="Max refinement iterations if quality is below standard.")
 def tune(user_vocals, suno_song, output, blend,
          reverb_room, reverb_wet, vocal_gain, no_effects,
-         model, device, stems_dir, max_iterations):
+         model, device, stems_dir):
     """Replace SUNO vocal timbre with your voice.
 
     Keeps the original song's pitch, timing, and rhythm exactly as-is.
@@ -79,7 +77,6 @@ def tune(user_vocals, suno_song, output, blend,
         demucs_model=model,
         device=device,
         stems_dir=stems_dir,
-        max_iterations=max_iterations,
     )
 
 

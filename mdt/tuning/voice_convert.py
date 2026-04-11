@@ -1,17 +1,15 @@
 """Voice timbre transfer: replace SUNO vocal timbre with the user's timbre.
 
-Uses the source-filter model of speech:
-- Source (excitation) = pitch harmonics, timing, rhythm → keep from SUNO
-- Filter (vocal tract) = formants, timbre, tone color → take from USER
+Source-filter model:
+- Source (pitch harmonics, timing) → keep from SUNO vocals
+- Filter (formants, timbre) → take from USER's voice
 
-Algorithm (cepstral spectral envelope transfer):
-1. STFT both the SUNO vocals and the user's voice sample
-2. Extract spectral envelope from each via cepstral smoothing
-3. For each frame of SUNO vocals:
-   - fine_structure = suno_magnitude / suno_envelope  (pitch + rhythm)
-   - new_magnitude = user_envelope * fine_structure    (user timbre + suno content)
-4. Reconstruct with SUNO's original phase
-5. Result: sounds like the user singing with SUNO's exact pitch and timing
+Algorithm:
+1. STFT both signals
+2. Extract spectral envelope (smooth shape) from each via cepstral liftering
+3. Transfer ratio: gain = user_envelope / suno_envelope (per-frame)
+4. Apply gain to SUNO magnitude, keep SUNO phase
+5. Reconstruct
 """
 
 from __future__ import annotations
@@ -19,181 +17,143 @@ from __future__ import annotations
 import numpy as np
 from scipy.fft import dct, idct
 
-from mdt.config import OUTPUT_SR
-
 
 def extract_spectral_envelope(
     magnitude_spectrum: np.ndarray,
-    n_cepstral: int = 60,
+    n_cepstral: int = 40,
 ) -> np.ndarray:
-    """Extract spectral envelope from a magnitude spectrum via cepstral smoothing.
+    """Extract spectral envelope via cepstral smoothing.
 
     Parameters
     ----------
     magnitude_spectrum : np.ndarray
-        Magnitude spectrum, shape ``(n_freq,)`` or ``(n_freq, n_frames)``.
+        Shape ``(n_freq,)`` or ``(n_freq, n_frames)``.
     n_cepstral : int
-        Number of cepstral coefficients to keep. Controls smoothness.
-        Lower = smoother envelope (more timbre, less pitch detail).
+        Cepstral coefficients to keep. Lower = smoother.
 
     Returns
     -------
     np.ndarray
-        Spectral envelope, same shape as input.
+        Spectral envelope, same shape.
     """
-    # Log magnitude (avoid log(0))
-    log_mag = np.log(magnitude_spectrum + 1e-10)
+    log_mag = np.log(np.maximum(magnitude_spectrum, 1e-10))
 
     if log_mag.ndim == 1:
-        # Single frame
-        cepstrum = dct(log_mag, type=2, norm="ortho")
-        cepstrum[n_cepstral:] = 0  # Lifter: keep only low quefrency
-        envelope = np.exp(idct(cepstrum, type=2, norm="ortho"))
-        return envelope
+        cep = dct(log_mag, type=2, norm="ortho")
+        cep[n_cepstral:] = 0
+        return np.exp(idct(cep, type=2, norm="ortho"))
 
-    # Multiple frames: process each column
     envelopes = np.zeros_like(log_mag)
     for i in range(log_mag.shape[1]):
-        cepstrum = dct(log_mag[:, i], type=2, norm="ortho")
-        cepstrum[n_cepstral:] = 0
-        envelopes[:, i] = np.exp(idct(cepstrum, type=2, norm="ortho"))
+        cep = dct(log_mag[:, i], type=2, norm="ortho")
+        cep[n_cepstral:] = 0
+        envelopes[:, i] = np.exp(idct(cep, type=2, norm="ortho"))
     return envelopes
 
 
 def extract_user_timbre(
     user_audio: np.ndarray,
-    sr: int = OUTPUT_SR,
+    sr: int,
     n_fft: int = 2048,
     hop_length: int = 512,
-    n_cepstral: int = 60,
-    energy_threshold: float = 0.01,
+    n_cepstral: int = 40,
 ) -> np.ndarray:
-    """Extract the user's average voice timbre as a spectral envelope.
+    """Extract the user's average spectral envelope (their timbre signature).
 
-    Only uses voiced/loud frames to avoid capturing silence/noise.
-
-    Parameters
-    ----------
-    user_audio : np.ndarray
-        User's voice recording (mono).
-    sr : int
-        Sample rate.
-    n_fft : int
-        FFT size.
-    hop_length : int
-        Hop size.
-    n_cepstral : int
-        Cepstral smoothing order.
-    energy_threshold : float
-        Minimum frame energy to include (filters out silence).
+    Only uses loud frames (voice, not silence).
 
     Returns
     -------
     np.ndarray
-        Average spectral envelope, shape ``(n_fft // 2 + 1,)``.
+        Shape ``(n_fft // 2 + 1,)`` — average spectral envelope.
     """
     import librosa
 
-    # Compute STFT
     S = librosa.stft(user_audio, n_fft=n_fft, hop_length=hop_length)
-    magnitude = np.abs(S)  # (n_freq, n_frames)
+    mag = np.abs(S)
 
-    # Filter out silent frames
-    frame_energy = np.mean(magnitude ** 2, axis=0)
-    threshold = energy_threshold * np.max(frame_energy)
-    voiced_mask = frame_energy > threshold
+    # Keep only loud frames (top 50% energy)
+    frame_energy = np.sum(mag ** 2, axis=0)
+    threshold = np.median(frame_energy)
+    loud = frame_energy > threshold
 
-    if np.sum(voiced_mask) < 5:
-        # Not enough voiced frames, use all
-        voiced_mask = np.ones(magnitude.shape[1], dtype=bool)
+    if np.sum(loud) < 5:
+        loud = np.ones(mag.shape[1], dtype=bool)
 
-    voiced_magnitude = magnitude[:, voiced_mask]
-
-    # Extract envelope for each voiced frame
-    envelopes = extract_spectral_envelope(voiced_magnitude, n_cepstral)
-
-    # Average across frames to get the user's characteristic timbre
-    avg_envelope = np.mean(envelopes, axis=1)
-
-    # Normalize so it doesn't change overall energy
-    avg_envelope = avg_envelope / (np.mean(avg_envelope) + 1e-10)
-
-    return avg_envelope
+    env = extract_spectral_envelope(mag[:, loud], n_cepstral)
+    avg = np.mean(env, axis=1)
+    return avg
 
 
 def convert_voice_timbre(
     suno_vocals: np.ndarray,
     user_audio: np.ndarray,
-    sr: int = OUTPUT_SR,
+    sr: int = 44100,
     n_fft: int = 2048,
     hop_length: int = 512,
-    n_cepstral: int = 60,
+    n_cepstral: int = 40,
     blend: float = 0.8,
 ) -> np.ndarray:
-    """Replace the timbre of SUNO vocals with the user's timbre.
+    """Replace SUNO vocal timbre with user's timbre.
 
     Keeps SUNO's pitch, timing, and rhythm exactly as-is.
-    Only changes the vocal tone color to sound like the user.
 
     Parameters
     ----------
     suno_vocals : np.ndarray
         Separated SUNO vocal track (mono).
     user_audio : np.ndarray
-        User's voice recording (mono). Used only to extract timbre.
+        User's voice recording (mono).
     sr : int
-        Sample rate (both signals must match).
-    n_fft : int
-        FFT size.
-    hop_length : int
-        Hop size.
+        Sample rate.
     n_cepstral : int
-        Cepstral smoothing order. Lower = more timbre transfer.
-        Typical range: 30-80. 60 is a good default.
+        Envelope smoothness. Lower = more timbre change.
     blend : float
-        Blend between original timbre (0.0) and user timbre (1.0).
-        0.0 = no change, 1.0 = full replacement.
+        0.0 = keep original, 1.0 = full user timbre.
 
     Returns
     -------
     np.ndarray
-        Vocals with user's timbre, same length and timing as suno_vocals.
+        Vocals with user's timbre.
     """
     import librosa
 
-    # 1. Extract user's average timbre
-    user_envelope = extract_user_timbre(
+    # 1. Get user's average timbre envelope
+    user_env = extract_user_timbre(
         user_audio, sr=sr, n_fft=n_fft,
         hop_length=hop_length, n_cepstral=n_cepstral,
     )
 
     # 2. STFT of SUNO vocals
-    S_suno = librosa.stft(suno_vocals, n_fft=n_fft, hop_length=hop_length)
-    magnitude_suno = np.abs(S_suno)
-    phase_suno = np.angle(S_suno)
+    S = librosa.stft(suno_vocals, n_fft=n_fft, hop_length=hop_length)
+    mag = np.abs(S)
+    phase = np.angle(S)
 
-    # 3. Extract SUNO's per-frame spectral envelope
-    suno_envelope = extract_spectral_envelope(magnitude_suno, n_cepstral)
+    # 3. Per-frame: compute gain = user_env / suno_env
+    suno_env = extract_spectral_envelope(mag, n_cepstral)
 
-    # 4. Compute fine structure (pitch harmonics + timing)
-    # fine_structure = magnitude / envelope
-    fine_structure = magnitude_suno / (suno_envelope + 1e-10)
+    # Gain ratio: how to reshape each frame's envelope to match user
+    # gain > 1 in bands where user is louder, < 1 where user is quieter
+    user_env_2d = user_env[:, np.newaxis]  # broadcast over frames
+    gain = user_env_2d / np.maximum(suno_env, 1e-10)
 
-    # 5. Build new magnitude: user timbre envelope * SUNO fine structure
-    # user_envelope is (n_freq,), broadcast over frames
-    user_env_2d = user_envelope[:, np.newaxis]
+    # Limit extreme gains to avoid artifacts
+    gain = np.clip(gain, 0.1, 10.0)
 
-    # Blend between original and user envelope
-    blended_envelope = (1 - blend) * suno_envelope + blend * user_env_2d
+    # Blend: interpolate gain toward 1.0 (no change)
+    gain = 1.0 + blend * (gain - 1.0)
 
-    new_magnitude = blended_envelope * fine_structure
+    # 4. Apply gain to magnitude, keep phase
+    new_mag = mag * gain
 
-    # 6. Reconstruct with original phase
-    S_converted = new_magnitude * np.exp(1j * phase_suno)
+    # 5. Preserve original energy per frame
+    # Scale so each frame's total energy matches the original
+    orig_energy = np.sum(mag ** 2, axis=0, keepdims=True) + 1e-10
+    new_energy = np.sum(new_mag ** 2, axis=0, keepdims=True) + 1e-10
+    new_mag = new_mag * np.sqrt(orig_energy / new_energy)
 
-    # 7. ISTFT
-    converted = librosa.istft(
-        S_converted, hop_length=hop_length, length=len(suno_vocals)
-    )
+    # 6. Reconstruct
+    S_out = new_mag * np.exp(1j * phase)
+    out = librosa.istft(S_out, hop_length=hop_length, length=len(suno_vocals))
 
-    return converted.astype(np.float32)
+    return out.astype(np.float32)
