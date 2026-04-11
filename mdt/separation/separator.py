@@ -55,12 +55,18 @@ def separate(
 ) -> StemResult:
     """Separate an audio file into stems.
 
-    Tries Demucs first (best quality). Falls back to spectral separation
-    if Demucs can't run.
+    If stems already exist in output_dir, reuses them (cache hit).
+    Otherwise runs Demucs (or spectral fallback).
     """
     audio_path = Path(audio_path).resolve()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check cache: if all 4 stems exist, skip separation
+    cached = _check_cache(audio_path, output_dir)
+    if cached is not None:
+        click.echo(f"  Using cached stems from {output_dir}")
+        return cached
 
     # Patch torchaudio BEFORE importing demucs
     _patch_torchaudio()
@@ -72,6 +78,32 @@ def separate(
         click.echo("  Falling back to spectral separation...")
         click.echo("  NOTE: For best results, install torchcodec: pip install torchcodec")
         return _separate_spectral(audio_path, output_dir)
+
+
+def _check_cache(audio_path: Path, output_dir: Path) -> StemResult | None:
+    """Return a StemResult if all 4 stems already exist in output_dir."""
+    expected = ["vocals.wav", "drums.wav", "bass.wav", "other.wav"]
+    paths = {name.replace(".wav", ""): output_dir / name for name in expected}
+
+    if not all(p.exists() for p in paths.values()):
+        return None
+
+    # Check stems are newer than the source audio (not stale)
+    source_mtime = audio_path.stat().st_mtime
+    oldest_stem = min(p.stat().st_mtime for p in paths.values())
+    if oldest_stem < source_mtime:
+        return None  # Source changed since stems were created
+
+    result = StemResult(
+        output_dir=output_dir,
+        model="cached",
+        source_path=audio_path,
+    )
+    result.vocals_path = paths["vocals"]
+    result.drums_path = paths["drums"]
+    result.bass_path = paths["bass"]
+    result.other_path = paths["other"]
+    return result
 
 
 def _separate_demucs(
