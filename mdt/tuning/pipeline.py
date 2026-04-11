@@ -100,14 +100,35 @@ def run_vocal_replacement(
         sr=OUTPUT_SR,
     )
 
-    # Quick sanity check: is the output silent?
-    vocal_rms = np.sqrt(np.mean(converted_vocals ** 2))
-    ref_rms = np.sqrt(np.mean(ref_vocals_hq ** 2))
-    click.echo(f"  Vocal energy: converted={vocal_rms:.4f} ref={ref_rms:.4f}")
-    if vocal_rms < ref_rms * 0.1:
-        click.echo("  WARNING: Converted vocals are very quiet. Boosting to match reference.")
-        if vocal_rms > 1e-8:
-            converted_vocals = converted_vocals * (ref_rms / vocal_rms)
+    # ── Diagnostic: save intermediate files & compare ──────────
+    import librosa as _lr
+    diag_dir = stems_dir
+    save_audio(diag_dir / "converted_vocals.wav", converted_vocals, OUTPUT_SR)
+    click.echo(f"  Saved intermediate: {diag_dir / 'converted_vocals.wav'}")
+
+    def _centroid(y):
+        return float(np.mean(_lr.feature.spectral_centroid(y=y, sr=OUTPUT_SR)))
+
+    def _mfcc(y):
+        return np.mean(_lr.feature.mfcc(y=y, sr=OUTPUT_SR, n_mfcc=13)[1:], axis=1)
+
+    def _cos(a, b):
+        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-20))
+
+    min_len = min(len(ref_vocals_hq), len(converted_vocals), len(user_audio_hq))
+    m_ref = _mfcc(ref_vocals_hq[:min_len])
+    m_out = _mfcc(converted_vocals[:min_len])
+    m_usr = _mfcc(user_audio_hq[:min_len])
+
+    click.echo(f"  Centroid: SUNO={_centroid(ref_vocals_hq):.0f} "
+               f"→ converted={_centroid(converted_vocals):.0f} "
+               f"(user={_centroid(user_audio_hq):.0f})")
+    click.echo(f"  MFCC sim: to_SUNO={_cos(m_ref, m_out):.3f} "
+               f"to_USER={_cos(m_usr, m_out):.3f}")
+    click.echo(f"  RMS: SUNO={np.sqrt(np.mean(ref_vocals_hq**2)):.4f} "
+               f"converted={np.sqrt(np.mean(converted_vocals**2)):.4f}")
+    click.echo(f"\n  → Listen to {diag_dir / 'converted_vocals.wav'} to check timbre")
+    click.echo(f"  → Compare with {stems_dir / 'vocals.wav'} (original SUNO vocal)")
     click.echo("  Done.")
 
     # ── Step 4: Master + Mix ───────────────────────────────────
