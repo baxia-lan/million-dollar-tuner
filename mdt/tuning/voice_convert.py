@@ -1,14 +1,12 @@
-"""Voice conversion using WORLD vocoder.
+"""Voice conversion using WORLD vocoder with spectral transfer function.
 
-WORLD is a mature speech analysis-synthesis system. It decomposes
-speech into three independent components:
-  1. F0 (pitch contour)
-  2. Spectral envelope (timbre / vocal tract shape)
-  3. Aperiodicity (breathiness / noise content)
+Instead of replacing SUNO's spectral envelope with user's average
+(which sounds robotic and barely audible), we compute the DIFFERENCE
+between user's and SUNO's average spectral envelopes and apply it
+as a "voice EQ" to each frame.
 
-To convert voice: keep SUNO's F0 + aperiodicity, replace spectral
-envelope with user's. This is the standard approach in speech synthesis
-research and actually works on real audio.
+This preserves the natural frame-to-frame variation of SUNO's vocals
+while shifting the overall timbre toward the user's voice.
 """
 
 from __future__ import annotations
@@ -24,59 +22,52 @@ def convert_voice_timbre(
 ) -> np.ndarray:
     """Replace SUNO vocal timbre with user's timbre using WORLD vocoder.
 
-    Parameters
-    ----------
-    suno_vocals : np.ndarray
-        Separated SUNO vocal track (mono, float64 or float32).
-    user_audio : np.ndarray
-        User's voice recording (mono). Any content — speaking or singing.
-    sr : int
-        Sample rate.
-
-    Returns
-    -------
-    np.ndarray
-        SUNO vocals resynthesized with user's voice timbre.
-        Same pitch, timing, rhythm as input.
+    Algorithm:
+    1. WORLD analysis: decompose both into F0 + spectral envelope + aperiodicity
+    2. Compute spectral transfer function: ratio of user/suno average envelopes
+    3. Apply transfer function to each SUNO frame (like a voice-specific EQ)
+    4. Synthesize: SUNO's F0 + warped envelope + SUNO's aperiodicity
     """
     import pyworld as pw
 
-    # WORLD requires float64
     suno_f64 = suno_vocals.astype(np.float64)
     user_f64 = user_audio.astype(np.float64)
 
     # ── Analyze SUNO vocals ────────────────────────────────────
-    # F0: pitch contour (what we KEEP)
     f0_suno, t_suno = pw.harvest(suno_f64, sr)
-    # Spectral envelope: timbre (what we REPLACE)
     sp_suno = pw.cheaptrick(suno_f64, f0_suno, t_suno, sr)
-    # Aperiodicity: breathiness/noise (what we KEEP)
     ap_suno = pw.d4c(suno_f64, f0_suno, t_suno, sr)
 
-    # ── Extract user's average timbre ──────────────────────────
+    # ── Analyze user voice ─────────────────────────────────────
     f0_user, t_user = pw.harvest(user_f64, sr)
     sp_user = pw.cheaptrick(user_f64, f0_user, t_user, sr)
 
-    # Only use voiced frames (where user is actually speaking/singing)
-    voiced = f0_user > 0
-    if np.sum(voiced) < 5:
-        # Not enough voiced frames — use all non-silent frames
-        frame_energy = np.sum(sp_user, axis=1)
-        voiced = frame_energy > np.median(frame_energy)
+    # ── Compute spectral transfer function ─────────────────────
+    # Average spectral envelope of voiced frames only
+    suno_voiced = f0_suno > 0
+    user_voiced = f0_user > 0
 
-    user_avg_sp = np.mean(sp_user[voiced], axis=0)  # average timbre
+    if np.sum(suno_voiced) < 5:
+        suno_voiced = np.ones(len(f0_suno), dtype=bool)
+    if np.sum(user_voiced) < 5:
+        user_voiced = np.ones(len(f0_user), dtype=bool)
 
-    # ── Replace spectral envelope ──────────────────────────────
-    sp_converted = np.zeros_like(sp_suno)
-    for i in range(len(sp_suno)):
-        suno_energy = np.sum(sp_suno[i])
-        if suno_energy < 1e-20:
-            # Silent frame — keep silent
-            sp_converted[i] = sp_suno[i]
-        else:
-            # Replace timbre shape, match energy level
-            user_energy = np.sum(user_avg_sp) + 1e-20
-            sp_converted[i] = user_avg_sp * (suno_energy / user_energy)
+    suno_avg = np.mean(sp_suno[suno_voiced], axis=0)
+    user_avg = np.mean(sp_user[user_voiced], axis=0)
+
+    # Transfer function = user / suno (in each frequency bin)
+    # This is the EQ curve that transforms SUNO's voice into user's voice
+    transfer = user_avg / (suno_avg + 1e-20)
+
+    # Apply transfer TWICE for stronger effect
+    # (like applying the same EQ curve twice — pushes timbre further toward user)
+    transfer = transfer * transfer
+
+    # Clip after squaring (±30dB max per bin)
+    transfer = np.clip(transfer, 0.03, 30.0)
+
+    # ── Apply transfer function to each SUNO frame ─────────────
+    sp_converted = sp_suno * transfer[np.newaxis, :]
 
     # ── Synthesize with WORLD ──────────────────────────────────
     output = pw.synthesize(f0_suno, sp_converted, ap_suno, sr)
