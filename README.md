@@ -11,11 +11,15 @@ brew install rubberband fluid-synth ffmpeg
 # 2. 克隆项目
 git clone <repo-url> && cd million-dollar-tuner
 
-# 3. 装 Python 包（会自动安装所有依赖，装完就有 mdt 命令）
+# 3. 创建虚拟环境并安装
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e .
 ```
 
-装完后终端输入 `mdt --version` 验证。
+装完后输入 `mdt --version` 验证。
+
+以后每次用之前先激活环境：`source .venv/bin/activate`
 
 ## 用法
 
