@@ -23,31 +23,32 @@ pip install -e .
 
 ## 用法
 
-### 核心：替换人声
+### 核心：用你的声音替换 SUNO 人声
 
 ```bash
-mdt tune 我的录音.wav suno歌曲.mp3 -o 成品.wav
+mdt tune 我的声音.wav suno歌曲.wav -o 成品.wav
 ```
 
-程序会自动：分离伴奏 -> 分析音高节奏 -> 修正你的音准 -> 对齐节奏 -> 混音输出。
-质量不达标会自动调参重试，最多 4 轮。
+原理：提取你的声音音色，替换掉 SUNO 歌曲里的人声音色。
+SUNO 原本的音调、节奏、歌词一切不变，只是听起来像你在唱。
 
-### 其他命令
-
-```bash
-mdt separate 歌曲.mp3 -o ./stems/          # 分离音轨（人声/鼓/贝斯/其他）
-mdt analyze 歌曲.mp3                        # 分析调性和 BPM
-mdt autotune 录音.wav -o 调音后.wav          # 简单自动调音（不需要参考歌曲）
-mdt resynth 歌曲.mp3 -o ./resynth/ --midi-only  # 转 MIDI（实验性）
-```
+你的录音不需要唱同一首歌，随便说话或唱歌都行，只要能采集到你的音色。
 
 ### 常用参数
 
 ```bash
-mdt tune 录音.wav 歌曲.mp3 -o 成品.wav \
-    --strength 0.9 \      # 音准修正力度 0.0-1.0（默认 0.8）
-    --max-shift 3 \        # 最大偏移半音数（默认 4）
+mdt tune 声音.wav 歌曲.wav -o 成品.wav \
+    --blend 0.9 \          # 音色替换程度 0.0-1.0（默认 0.8）
     --no-effects           # 不加混响压缩等效果
+```
+
+### 其他命令
+
+```bash
+mdt separate 歌曲.wav -o ./stems/          # 分离音轨（人声/鼓/贝斯/其他）
+mdt analyze 歌曲.wav                        # 分析调性和 BPM
+mdt autotune 录音.wav -o 调音后.wav          # 简单自动调音（不需要参考歌曲）
+mdt resynth 歌曲.wav -o ./resynth/ --midi-only  # 转 MIDI（实验性）
 ```
 
 ## 支持格式
@@ -57,12 +58,20 @@ mdt tune 录音.wav 歌曲.mp3 -o 成品.wav \
 ## 工作原理
 
 ```
-SUNO歌曲 -> [Demucs分离] -> 伴奏
-你的录音 -> [PYIN检测] -> [PSOLA调音] -> [DTW对齐] -> [混音] -> 成品
+SUNO歌曲 -> [Demucs分离] -> 人声 + 伴奏
+                              |
+你的声音 -> [提取音色] ------> [音色替换] -> 你的音色 + SUNO 原调
+                                              |
+                              伴奏 ---------> [混音] -> 成品
 ```
+
+核心技术：频谱包络转移（Spectral Envelope Transfer）
+- 从你的声音提取声道特征（共振峰/音色）
+- 保留 SUNO 人声的激励信号（音高/节奏/谐波细节）
+- 用你的音色包络替换 SUNO 的音色包络
 
 ## 录音建议
 
-- 戴耳机听着 SUNO 歌曲跟唱，录音长度尽量和原曲接近
-- 安静环境，WAV 格式录制
-- 不用唱得很准，程序会修正
+- 随便说话或唱歌都行，10 秒以上就够
+- 安静环境，WAV 格式
+- 不需要唱同一首歌，不需要唱准

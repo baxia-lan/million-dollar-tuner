@@ -28,10 +28,8 @@ def main():
 @click.argument("suno_song", type=click.Path(exists=True))
 @click.option("-o", "--output", default="output.wav",
               help="Output file path (WAV or MP3).")
-@click.option("--strength", default=0.8, type=float,
-              help="Pitch correction strength [0.0–1.0].")
-@click.option("--max-shift", default=4.0, type=float,
-              help="Maximum pitch shift in semitones.")
+@click.option("--blend", default=0.8, type=float,
+              help="Timbre blend: 0.0=keep original voice, 1.0=full your voice.")
 @click.option("--reverb-room", default=0.3, type=float,
               help="Reverb room size [0.0–1.0].")
 @click.option("--reverb-wet", default=0.15, type=float,
@@ -48,12 +46,15 @@ def main():
               help="Directory to save separated stems.")
 @click.option("--max-iterations", default=4, type=int,
               help="Max refinement iterations if quality is below standard.")
-def tune(user_vocals, suno_song, output, strength, max_shift,
+def tune(user_vocals, suno_song, output, blend,
          reverb_room, reverb_wet, vocal_gain, no_effects,
          model, device, stems_dir, max_iterations):
-    """Replace SUNO vocals with your own tuned voice.
+    """Replace SUNO vocal timbre with your voice.
 
-    USER_VOCALS is your singing recording (WAV/MP3).
+    Keeps the original song's pitch, timing, and rhythm exactly as-is.
+    Only changes the tone color to sound like you.
+
+    USER_VOCALS is a recording of your voice (just talking or singing, any content).
     SUNO_SONG is the SUNO AI-generated song (WAV/MP3).
 
     Example:
@@ -63,15 +64,14 @@ def tune(user_vocals, suno_song, output, strength, max_shift,
     from mdt.tuning.pipeline import run_vocal_replacement
 
     click.echo("=" * 60)
-    click.echo("  Million Dollar Tuner — Vocal Replacement")
+    click.echo("  Million Dollar Tuner — Voice Timbre Replacement")
     click.echo("=" * 60)
 
     run_vocal_replacement(
         user_vocals_path=user_vocals,
         suno_song_path=suno_song,
         output_path=output,
-        correction_strength=strength,
-        max_shift=max_shift,
+        blend=blend,
         apply_effects=not no_effects,
         reverb_room=reverb_room,
         reverb_wet=reverb_wet,
