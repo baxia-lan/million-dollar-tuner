@@ -1,95 +1,223 @@
-"""Voice timbre transfer: replace SUNO vocal timbre with the user's timbre.
+"""Voice conversion via LPC (Linear Predictive Coding).
 
-Source-filter model:
-- Source (excitation: pitch harmonics + timing) → keep from SUNO
-- Filter (vocal tract: formants + timbre) → take from USER
+LPC models the vocal tract as an all-pole filter:
+  speech = excitation * vocal_tract_filter
 
-Only transfers the spectral SHAPE (relative peaks/valleys), not
-the absolute volume. Uses per-frame energy normalization to guarantee
-output volume matches input volume exactly.
+To convert voice A to voice B:
+  1. Analyze A: extract excitation (pitch pulses) and LPC filter (vocal tract)
+  2. Analyze B: extract LPC filter (vocal tract)
+  3. Synthesize: pass A's excitation through B's filter
+  Result: A's pitch/timing + B's vocal tract = B's voice singing A's melody
+
+This is fundamentally different from spectral envelope methods because
+LPC explicitly models the resonant structure of the vocal tract
+(formants), producing a clearly audible voice change.
 """
 
 from __future__ import annotations
 
 import numpy as np
-from scipy.fft import dct, idct
 
 
-def _cepstral_envelope(log_mag: np.ndarray, order: int) -> np.ndarray:
-    """Low-quefrency cepstral envelope of a single log-magnitude frame."""
-    cep = dct(log_mag, type=2, norm="ortho")
-    cep[order:] = 0
-    return idct(cep, type=2, norm="ortho")
+def _lpc_coefficients(frame: np.ndarray, order: int) -> np.ndarray:
+    """Compute LPC coefficients using autocorrelation method (Levinson-Durbin)."""
+    from scipy.signal import lfilter
+
+    # Autocorrelation
+    n = len(frame)
+    r = np.correlate(frame, frame, mode='full')[n - 1:n + order]
+
+    if r[0] == 0:
+        return np.zeros(order + 1)
+
+    # Levinson-Durbin recursion
+    a = np.zeros(order + 1)
+    a[0] = 1.0
+    e = r[0]
+
+    for i in range(1, order + 1):
+        lam = -np.sum(a[1:i] * r[i - 1:0:-1]) - r[i]
+        lam /= (e + 1e-20)
+        lam = np.clip(lam, -0.999, 0.999)  # stability
+
+        # Update coefficients
+        a_new = a.copy()
+        for j in range(1, i):
+            a_new[j] = a[j] + lam * a[i - j]
+        a_new[i] = lam
+        a = a_new
+
+        e *= (1 - lam * lam)
+        if e <= 0:
+            break
+
+    return a
+
+
+def _lpc_residual(frame: np.ndarray, lpc: np.ndarray) -> np.ndarray:
+    """Get the excitation signal by inverse-filtering with LPC coefficients."""
+    from scipy.signal import lfilter
+    # Inverse filter: A(z) * speech = excitation
+    residual = lfilter(lpc, [1.0], frame)
+    return residual
+
+
+def _lpc_synthesize(residual: np.ndarray, lpc: np.ndarray) -> np.ndarray:
+    """Synthesize speech by filtering excitation through LPC vocal tract."""
+    from scipy.signal import lfilter
+    # Synthesis filter: speech = 1/A(z) * excitation
+    return lfilter([1.0], lpc, residual)
 
 
 def convert_voice_timbre(
     suno_vocals: np.ndarray,
     user_audio: np.ndarray,
     sr: int = 44100,
-    n_fft: int = 2048,
-    hop_length: int = 512,
-    order: int = 20,
+    frame_ms: int = 25,
+    hop_ms: int = 10,
+    lpc_order: int = 40,
 ) -> np.ndarray:
-    """Replace SUNO vocal timbre with user's timbre.
+    """Replace SUNO vocal timbre with user's timbre using LPC cross-synthesis.
 
-    For each SUNO frame:
-      1. Extract envelope and residual (pitch harmonics)
-      2. Replace envelope shape with user's shape
-      3. Force output frame energy = input frame energy (no volume change)
-      4. Recombine with original phase
+    Parameters
+    ----------
+    suno_vocals : np.ndarray
+        Separated SUNO vocal track (mono, float32).
+    user_audio : np.ndarray
+        User's voice recording (mono, float32).
+    sr : int
+        Sample rate.
+    frame_ms : int
+        Frame length in milliseconds.
+    hop_ms : int
+        Hop size in milliseconds.
+    lpc_order : int
+        LPC order. Higher = more detailed vocal tract model.
+        24 is good for 44.1kHz (captures formants F1-F5).
+
+    Returns
+    -------
+    np.ndarray
+        SUNO vocals resynthesized with user's vocal tract.
     """
-    import librosa
+    frame_len = int(sr * frame_ms / 1000)
+    hop_len = int(sr * hop_ms / 1000)
 
-    # ── Extract user's average spectral shape ──────────────────
-    S_user = librosa.stft(user_audio, n_fft=n_fft, hop_length=hop_length)
-    mag_user = np.abs(S_user)
+    # ── Extract user's average LPC filter ──────────────────────
+    user_lpc = _extract_average_lpc(user_audio, sr, frame_len, hop_len, lpc_order)
 
-    # Only loud frames
-    frame_energy = np.sum(mag_user ** 2, axis=0)
-    loud = frame_energy > np.median(frame_energy)
-    if np.sum(loud) < 5:
-        loud = np.ones(mag_user.shape[1], dtype=bool)
+    # ── Frame-by-frame cross-synthesis ─────────────────────────
+    n_samples = len(suno_vocals)
+    output = np.zeros(n_samples + frame_len, dtype=np.float64)
+    window = np.hanning(frame_len)
 
-    log_user = np.log(np.maximum(mag_user[:, loud], 1e-10))
-    user_shapes = np.zeros_like(log_user)
-    for i in range(log_user.shape[1]):
-        env = _cepstral_envelope(log_user[:, i], order)
-        user_shapes[:, i] = env - np.mean(env)  # zero-mean shape
-    user_shape = np.mean(user_shapes, axis=1)
-    # Re-center
-    user_shape -= np.mean(user_shape)
+    # Overlap-add synthesis
+    pos = 0
+    while pos + frame_len <= n_samples:
+        frame = suno_vocals[pos:pos + frame_len] * window
 
-    # ── Process SUNO vocals ────────────────────────────────────
-    S_suno = librosa.stft(suno_vocals, n_fft=n_fft, hop_length=hop_length)
-    mag_suno = np.abs(S_suno)
-    phase_suno = np.angle(S_suno)
+        # Skip silent frames
+        energy = np.sum(frame ** 2)
+        if energy < 1e-10:
+            pos += hop_len
+            continue
 
-    log_suno = np.log(np.maximum(mag_suno, 1e-10))
-    n_freq, n_frames = log_suno.shape
-    new_mag = np.zeros_like(mag_suno)
+        # 1. Get SUNO's excitation (inverse filter with SUNO's LPC)
+        suno_lpc = _lpc_coefficients(frame, lpc_order)
+        excitation = _lpc_residual(frame, suno_lpc)
 
-    for i in range(n_frames):
-        suno_env = _cepstral_envelope(log_suno[:, i], order)
-        residual = log_suno[:, i] - suno_env
+        # 2. Resynthesize with USER's vocal tract filter
+        converted = _lpc_synthesize(excitation, user_lpc)
 
-        # Replace shape: suno_level + user_shape + residual
-        suno_level = np.mean(suno_env)
-        log_frame = suno_level + user_shape + residual
-        new_mag[:, i] = np.exp(log_frame)
+        # 3. Match energy of original frame
+        conv_energy = np.sum(converted ** 2) + 1e-20
+        converted *= np.sqrt(energy / conv_energy)
 
-    # ── Per-frame energy normalization ─────────────────────────
-    # This is the critical step: force each frame's energy to match
-    # the original exactly. This guarantees:
-    # - Output is never silent (energy is preserved)
-    # - Output is never clipping (energy doesn't explode)
-    # - Only the spectral DISTRIBUTION changes, not the level
-    orig_energy = np.sum(mag_suno ** 2, axis=0) + 1e-20
-    new_energy = np.sum(new_mag ** 2, axis=0) + 1e-20
-    scale = np.sqrt(orig_energy / new_energy)
-    new_mag *= scale[np.newaxis, :]
+        # Overlap-add
+        output[pos:pos + frame_len] += converted * window
+        pos += hop_len
 
-    # Reconstruct
-    S_out = new_mag * np.exp(1j * phase_suno)
-    out = librosa.istft(S_out, hop_length=hop_length, length=len(suno_vocals))
+    output = output[:n_samples]
 
-    return out.astype(np.float32)
+    # Match overall RMS to input (guarantees same volume)
+    rms_in = np.sqrt(np.mean(suno_vocals ** 2)) + 1e-20
+    rms_out = np.sqrt(np.mean(output ** 2)) + 1e-20
+    output *= rms_in / rms_out
+
+    return output.astype(np.float32)
+
+
+def _extract_average_lpc(
+    audio: np.ndarray,
+    sr: int,
+    frame_len: int,
+    hop_len: int,
+    lpc_order: int,
+) -> np.ndarray:
+    """Extract average LPC from voiced frames via autocorrelation averaging.
+
+    Instead of averaging LPC coefficients directly (which can produce
+    unstable filters), we average the autocorrelation vectors and then
+    solve for LPC once. This guarantees a stable filter.
+    """
+    window = np.hanning(frame_len)
+    n_samples = len(audio)
+
+    # Collect autocorrelation from loud frames
+    all_energies = []
+    all_autocorrs = []
+    pos = 0
+    while pos + frame_len <= n_samples:
+        frame = audio[pos:pos + frame_len] * window
+        energy = np.sum(frame ** 2)
+        if energy > 1e-8:
+            r = np.correlate(frame, frame, mode='full')[frame_len - 1:frame_len + lpc_order]
+            all_energies.append(energy)
+            all_autocorrs.append(r)
+        pos += hop_len
+
+    if not all_autocorrs:
+        lpc = np.zeros(lpc_order + 1)
+        lpc[0] = 1.0
+        return lpc
+
+    # Keep top 50% loudest
+    pairs = sorted(zip(all_energies, all_autocorrs), reverse=True)
+    keep = max(len(pairs) // 2, 3)
+    loud_autocorrs = [ac for _, ac in pairs[:keep]]
+
+    # Average autocorrelation → solve for LPC
+    avg_r = np.mean(loud_autocorrs, axis=0)
+
+    # Construct a "virtual" frame whose autocorrelation = avg_r
+    # Then compute LPC on it. Since LPC only uses autocorrelation,
+    # we can feed avg_r directly into Levinson-Durbin.
+    lpc = _levinson_durbin(avg_r, lpc_order)
+    return lpc
+
+
+def _levinson_durbin(r: np.ndarray, order: int) -> np.ndarray:
+    """Solve for LPC coefficients from autocorrelation using Levinson-Durbin."""
+    a = np.zeros(order + 1)
+    a[0] = 1.0
+    e = r[0]
+
+    if e <= 0:
+        return a
+
+    for i in range(1, order + 1):
+        lam = -np.sum(a[1:i] * r[i - 1:0:-1]) - r[i]
+        lam /= (e + 1e-20)
+        lam = np.clip(lam, -0.999, 0.999)
+
+        a_new = a.copy()
+        for j in range(1, i):
+            a_new[j] = a[j] + lam * a[i - j]
+        a_new[i] = lam
+        a = a_new
+
+        e *= (1 - lam * lam)
+        if e <= 0:
+            break
+
+    return a
