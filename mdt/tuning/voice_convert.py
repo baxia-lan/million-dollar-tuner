@@ -1,12 +1,13 @@
-"""Voice conversion using WORLD vocoder with spectral transfer function.
+"""Voice conversion using WORLD vocoder with frequency warping.
 
-Instead of replacing SUNO's spectral envelope with user's average
-(which sounds robotic and barely audible), we compute the DIFFERENCE
-between user's and SUNO's average spectral envelopes and apply it
-as a "voice EQ" to each frame.
+Instead of applying an EQ (which barely changes perceived voice identity),
+we WARP the spectral envelope along the frequency axis — physically moving
+the formant peaks to different positions. This is equivalent to changing
+the vocal tract length, which is the primary physical difference between
+voices.
 
-This preserves the natural frame-to-frame variation of SUNO's vocals
-while shifting the overall timbre toward the user's voice.
+EQ:      boosts/cuts energy at fixed positions → subtle, same voice
+Warping: MOVES resonant peaks to new positions → clearly different voice
 """
 
 from __future__ import annotations
@@ -20,30 +21,27 @@ def convert_voice_timbre(
     sr: int = 44100,
     **kwargs,
 ) -> np.ndarray:
-    """Replace SUNO vocal timbre with user's timbre using WORLD vocoder.
+    """Replace SUNO vocal timbre with user's timbre.
 
-    Algorithm:
-    1. WORLD analysis: decompose both into F0 + spectral envelope + aperiodicity
-    2. Compute spectral transfer function: ratio of user/suno average envelopes
-    3. Apply transfer function to each SUNO frame (like a voice-specific EQ)
-    4. Synthesize: SUNO's F0 + warped envelope + SUNO's aperiodicity
+    Uses WORLD vocoder + spectral envelope frequency warping.
+    Formant peaks are physically moved to match user's voice.
     """
     import pyworld as pw
 
     suno_f64 = suno_vocals.astype(np.float64)
     user_f64 = user_audio.astype(np.float64)
 
-    # ── Analyze SUNO vocals ────────────────────────────────────
+    # ── Analyze both voices ────────────────────────────────────
     f0_suno, t_suno = pw.harvest(suno_f64, sr)
     sp_suno = pw.cheaptrick(suno_f64, f0_suno, t_suno, sr)
     ap_suno = pw.d4c(suno_f64, f0_suno, t_suno, sr)
 
-    # ── Analyze user voice ─────────────────────────────────────
     f0_user, t_user = pw.harvest(user_f64, sr)
     sp_user = pw.cheaptrick(user_f64, f0_user, t_user, sr)
 
-    # ── Compute spectral transfer function ─────────────────────
-    # Average spectral envelope of voiced frames only
+    # ── Compute frequency warping ratio ────────────────────────
+    # Use spectral centroid of voiced frames to determine how much
+    # to stretch/compress the frequency axis
     suno_voiced = f0_suno > 0
     user_voiced = f0_user > 0
 
@@ -55,22 +53,47 @@ def convert_voice_timbre(
     suno_avg = np.mean(sp_suno[suno_voiced], axis=0)
     user_avg = np.mean(sp_user[user_voiced], axis=0)
 
-    # Transfer function = user / suno (in each frequency bin)
-    # This is the EQ curve that transforms SUNO's voice into user's voice
+    # Weighted centroid of spectral envelopes
+    freqs = np.arange(len(suno_avg), dtype=np.float64)
+    suno_centroid = np.sum(freqs * suno_avg) / (np.sum(suno_avg) + 1e-20)
+    user_centroid = np.sum(freqs * user_avg) / (np.sum(user_avg) + 1e-20)
+
+    # Warp ratio: < 1 shifts formants down, > 1 shifts up
+    warp_ratio = user_centroid / (suno_centroid + 1e-20)
+    warp_ratio = np.clip(warp_ratio, 0.5, 2.0)
+
+    n_freq = sp_suno.shape[1]
+
+    # ── Warp spectral envelope of each frame ───────────────────
+    sp_warped = np.zeros_like(sp_suno)
+    old_indices = np.arange(n_freq, dtype=np.float64)
+
+    # Also compute EQ transfer for additional timbre matching
     transfer = user_avg / (suno_avg + 1e-20)
+    transfer = np.clip(transfer, 0.1, 10.0)
 
-    # Apply transfer TWICE for stronger effect
-    # (like applying the same EQ curve twice — pushes timbre further toward user)
-    transfer = transfer * transfer
+    for i in range(len(sp_suno)):
+        # Step 1: Frequency warp (moves formant positions)
+        # Map old frequency bins to new positions
+        new_indices = old_indices * warp_ratio
+        # Interpolate: resample the spectral envelope along warped axis
+        warped = np.interp(old_indices, new_indices, sp_suno[i],
+                           left=sp_suno[i, 0], right=sp_suno[i, -1])
 
-    # Clip after squaring (±30dB max per bin)
-    transfer = np.clip(transfer, 0.03, 30.0)
+        # Step 2: Apply residual EQ transfer (fine-tune timbre)
+        warped = warped * transfer
 
-    # ── Apply transfer function to each SUNO frame ─────────────
-    sp_converted = sp_suno * transfer[np.newaxis, :]
+        sp_warped[i] = warped
 
-    # ── Synthesize with WORLD ──────────────────────────────────
-    output = pw.synthesize(f0_suno, sp_converted, ap_suno, sr)
+    # ── Also warp the aperiodicity ─────────────────────────────
+    ap_warped = np.zeros_like(ap_suno)
+    for i in range(len(ap_suno)):
+        new_indices = old_indices * warp_ratio
+        ap_warped[i] = np.interp(old_indices, new_indices, ap_suno[i],
+                                  left=ap_suno[i, 0], right=ap_suno[i, -1])
+
+    # ── Synthesize ─────────────────────────────────────────────
+    output = pw.synthesize(f0_suno, sp_warped, ap_warped, sr)
 
     # Match length
     if len(output) > len(suno_vocals):
