@@ -20,6 +20,49 @@ def main():
 
 
 # ────────────────────────────────────────────────────────────────
+# mdt train-voice — Train a voice model
+# ────────────────────────────────────────────────────────────────
+
+@main.command("train-voice")
+@click.argument("audio_files", nargs=-1, type=click.Path(exists=True), required=True)
+@click.option("-o", "--output-dir", default="voice_model",
+              help="Directory to save the trained model.")
+@click.option("--name", default="user",
+              help="Speaker name for the model.")
+@click.option("--epochs", default=100, type=int,
+              help="Training epochs. More = better quality but slower.")
+def train_voice(audio_files, output_dir, name, epochs):
+    """Train a voice model from your recordings.
+
+    Run this ONCE with your voice recordings. Then use 'mdt tune'
+    with --voice-model to convert vocals.
+
+    AUDIO_FILES: one or more recordings of your voice (WAV/MP3).
+    Longer recordings (>1 min) give better results.
+
+    Example:
+
+        mdt train-voice my_voice.wav --epochs 100
+        mdt tune suno_song.wav -o result.wav --voice-model voice_model/
+    """
+    from mdt.tuning.voice_convert import train_voice_model
+
+    click.echo("=" * 60)
+    click.echo("  Million Dollar Tuner — Voice Model Training")
+    click.echo("=" * 60)
+
+    train_voice_model(
+        audio_paths=list(audio_files),
+        speaker_name=name,
+        output_dir=output_dir,
+        epochs=epochs,
+    )
+
+    click.echo(f"\nDone! Use your model with:")
+    click.echo(f"  mdt tune suno_song.wav -o result.wav --voice-model {output_dir}/")
+
+
+# ────────────────────────────────────────────────────────────────
 # mdt tune — Core vocal replacement
 # ────────────────────────────────────────────────────────────────
 
@@ -28,6 +71,8 @@ def main():
 @click.argument("suno_song", type=click.Path(exists=True))
 @click.option("-o", "--output", default="output.wav",
               help="Output file path (WAV or MP3).")
+@click.option("--voice-model", default=None, type=click.Path(),
+              help="Path to trained voice model (from 'mdt train-voice').")
 @click.option("--reverb-room", default=0.3, type=float,
               help="Reverb room size [0.0–1.0].")
 @click.option("--reverb-wet", default=0.15, type=float,
@@ -42,7 +87,7 @@ def main():
               help="Torch device (cuda/cpu/auto).")
 @click.option("--stems-dir", default=None, type=click.Path(),
               help="Directory to save separated stems.")
-def tune(user_vocals, suno_song, output,
+def tune(user_vocals, suno_song, output, voice_model,
          reverb_room, reverb_wet, vocal_gain, no_effects,
          model, device, stems_dir):
     """Replace SUNO vocal timbre with your voice.
@@ -67,6 +112,7 @@ def tune(user_vocals, suno_song, output,
         user_vocals_path=user_vocals,
         suno_song_path=suno_song,
         output_path=output,
+        voice_model_dir=voice_model,
         apply_effects=not no_effects,
         reverb_room=reverb_room,
         reverb_wet=reverb_wet,

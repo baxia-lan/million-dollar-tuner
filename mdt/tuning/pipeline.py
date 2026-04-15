@@ -38,6 +38,7 @@ def run_vocal_replacement(
     user_vocals_path: str | Path,
     suno_song_path: str | Path,
     output_path: str | Path = "output.wav",
+    voice_model_dir: str | Path | None = None,
     apply_effects: bool = True,
     reverb_room: float = 0.3,
     reverb_wet: float = 0.15,
@@ -98,6 +99,7 @@ def run_vocal_replacement(
         suno_vocals=ref_vocals_hq,
         user_audio=user_audio_hq,
         sr=OUTPUT_SR,
+        model_dir=voice_model_dir,
     )
 
     # ── Diagnostic: save intermediate files & compare ──────────
