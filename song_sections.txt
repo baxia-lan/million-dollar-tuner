@@ -1,0 +1,18 @@
+Song Structure Analysis: 越界 (Duck The Rope)
+Total duration: 235.1s
+=================================================================
+
+  [   0.0s -   24.0s]  ( 24.0s)  intro       intro
+  [  24.0s -   60.0s]  ( 36.0s)  rap         verse1_rap
+  [  60.0s -   96.0s]  ( 36.0s)  melodic     chorus1
+  [  96.0s -  124.0s]  ( 28.0s)  rap         verse2_rap
+  [ 124.0s -  148.0s]  ( 24.0s)  melodic     chorus2
+  [ 148.0s -  172.0s]  ( 24.0s)  rap         verse3_rap
+  [ 172.0s -  212.0s]  ( 40.0s)  melodic     chorus3
+  [ 212.0s -  235.1s]  ( 23.1s)  outro       outro
+
+Summary:
+  intro       : 1 section(s), 24.0s total
+  melodic     : 3 section(s), 100.0s total
+  outro       : 1 section(s), 23.1s total
+  rap         : 3 section(s), 88.0s total

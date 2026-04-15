@@ -1,0 +1,52 @@
+{
+  "sections": [
+    {
+      "start": 0.0,
+      "end": 24.0,
+      "type": "intro",
+      "label": "intro"
+    },
+    {
+      "start": 24.0,
+      "end": 60.0,
+      "type": "rap",
+      "label": "verse1_rap"
+    },
+    {
+      "start": 60.0,
+      "end": 96.0,
+      "type": "melodic",
+      "label": "chorus1"
+    },
+    {
+      "start": 96.0,
+      "end": 124.0,
+      "type": "rap",
+      "label": "verse2_rap"
+    },
+    {
+      "start": 124.0,
+      "end": 148.0,
+      "type": "melodic",
+      "label": "chorus2"
+    },
+    {
+      "start": 148.0,
+      "end": 172.0,
+      "type": "rap",
+      "label": "verse3_rap"
+    },
+    {
+      "start": 172.0,
+      "end": 212.0,
+      "type": "melodic",
+      "label": "chorus3"
+    },
+    {
+      "start": 212.0,
+      "end": 235.1,
+      "type": "outro",
+      "label": "outro"
+    }
+  ]
+}

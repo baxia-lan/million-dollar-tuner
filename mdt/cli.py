@@ -435,5 +435,346 @@ def evaluate(result_vocals, reference_song, stems_dir, model, device):
         click.echo("  Tip: Try --strength 0.9 or re-record closer to the melody.")
 
 
+# ────────────────────────────────────────────────────────────────
+# mdt profile — Voice profile management
+# ────────────────────────────────────────────────────────────────
+
+@main.group()
+def profile():
+    """Manage voice profiles for neural voice conversion."""
+    pass
+
+
+@profile.command("create")
+@click.argument("name")
+@click.argument("audio_file", type=click.Path(exists=True))
+@click.option("--backends", default="applio,sovits,seedvc",
+              help="Comma-separated list of backends to train.")
+@click.option("--epochs", default=30, type=int,
+              help="Training epochs for each backend.")
+@click.option("--batch-size", default=4, type=int,
+              help="Training batch size.")
+def profile_create(name, audio_file, backends, epochs, batch_size):
+    """Create a new voice profile from a recording.
+
+    NAME is the profile identifier (e.g. 'my_voice').
+    AUDIO_FILE is a WAV/M4A recording of your voice (10+ minutes recommended).
+
+    Example:
+
+        mdt profile create my_voice ~/recordings/voice.wav --backends applio
+    """
+    from mdt.profiles.manager import create_profile
+
+    backend_list = [b.strip() for b in backends.split(",")]
+    click.echo(f"Creating profile '{name}' with backends: {backend_list}")
+    click.echo(f"Training {epochs} epochs, batch size {batch_size}")
+    click.echo()
+
+    meta = create_profile(
+        name=name,
+        audio_path=audio_file,
+        backends=backend_list,
+        epochs=epochs,
+        batch_size=batch_size,
+    )
+
+    click.echo()
+    click.echo(f"Profile '{name}' created successfully!")
+    for bname, bstatus in meta.backends.items():
+        status = "trained" if bstatus.trained else "FAILED"
+        click.echo(f"  {bname}: {status}")
+
+
+@profile.command("list")
+def profile_list():
+    """List all voice profiles."""
+    from mdt.profiles.manager import list_profiles
+
+    profiles = list_profiles()
+    if not profiles:
+        click.echo("No profiles found. Create one with: mdt profile create <name> <audio>")
+        return
+
+    click.echo(f"{'Name':<20} {'Created':<22} {'Backends'}")
+    click.echo("-" * 60)
+    for p in profiles:
+        backends = ", ".join(
+            f"{k}({'ok' if v.trained else 'x'})" for k, v in p.backends.items()
+        )
+        click.echo(f"{p.name:<20} {p.created_at[:19]:<22} {backends}")
+
+
+@profile.command("refresh")
+@click.argument("name")
+@click.option("--audio", default=None, type=click.Path(exists=True),
+              help="New audio file to retrain with.")
+@click.option("--backends", default=None,
+              help="Comma-separated list of backends to retrain.")
+@click.option("--epochs", default=30, type=int)
+@click.option("--batch-size", default=4, type=int)
+def profile_refresh(name, audio, backends, epochs, batch_size):
+    """Retrain backends for an existing profile.
+
+    Example:
+
+        mdt profile refresh my_voice --audio new_recording.wav --backends applio
+    """
+    from mdt.profiles.manager import refresh_profile
+
+    backend_list = [b.strip() for b in backends.split(",")] if backends else None
+    click.echo(f"Refreshing profile '{name}'...")
+
+    meta = refresh_profile(
+        name=name,
+        audio_path=audio,
+        backends=backend_list,
+        epochs=epochs,
+        batch_size=batch_size,
+    )
+
+    click.echo(f"Profile '{name}' refreshed!")
+    for bname, bstatus in meta.backends.items():
+        status = "trained" if bstatus.trained else "FAILED"
+        click.echo(f"  {bname}: {status}")
+
+
+# ────────────────────────────────────────────────────────────────
+# mdt convert — Neural voice conversion
+# ────────────────────────────────────────────────────────────────
+
+@main.command()
+@click.argument("profile_name")
+@click.argument("song", type=click.Path(exists=True))
+@click.option("-o", "--output", default="converted.wav",
+              help="Output file path.")
+@click.option("--backend", default=None,
+              help="Backend to use (applio/sovits/seedvc). Auto-selects if omitted.")
+@click.option("--pitch-shift", default=0, type=int,
+              help="Pitch shift in semitones.")
+@click.option("--stems-dir", default=None, type=click.Path(),
+              help="Pre-separated stems directory (skips separation).")
+@click.option("--vocals-only", is_flag=True,
+              help="Output converted vocals only (no mixing with instrumentals).")
+@click.option("--sections", default=None, type=click.Path(exists=True),
+              help="Song sections JSON for phrase-level chunked inference.")
+def convert(profile_name, song, output, backend, pitch_shift, stems_dir, vocals_only, sections):
+    """Convert a song's vocals to your voice using a trained profile.
+
+    PROFILE_NAME is a previously created voice profile.
+    SONG is the input song (WAV/MP3).
+
+    Example:
+
+        mdt convert my_voice suno_song.wav -o output.wav --backend applio
+    """
+    from pathlib import Path as P
+
+    from mdt.profiles.manager import load_profile, get_profile_dir
+    from mdt.vc.registry import get_backend, get_best_backend
+
+    click.echo("=" * 60)
+    click.echo("  Million Dollar Tuner — Neural Voice Conversion")
+    click.echo("=" * 60)
+
+    meta = load_profile(profile_name)
+    profile_dir = get_profile_dir(profile_name)
+
+    # Select backend
+    if backend:
+        vc = get_backend(backend)
+        if backend not in meta.backends or not meta.backends[backend].trained:
+            click.echo(f"WARNING: Backend '{backend}' not trained for this profile.")
+    else:
+        vc = get_best_backend(profile_dir)
+        click.echo(f"Auto-selected backend: {vc.name}")
+
+    # Separate stems if needed
+    if stems_dir:
+        vocals_path = P(stems_dir) / "vocals.wav"
+        if not vocals_path.exists():
+            click.echo(f"ERROR: {vocals_path} not found in stems directory")
+            return
+    else:
+        click.echo("\nSeparating stems...")
+        from mdt.separation.separator import separate as do_separate
+        stems = do_separate(audio_path=song, output_dir="convert_stems")
+        vocals_path = P(stems.vocals_path)
+        stems_dir = str(P(stems.vocals_path).parent)
+
+    # Run voice conversion
+    converted_path = P(output).with_suffix(".vocals.wav") if not vocals_only else P(output)
+
+    if sections:
+        # Phrase-level chunked inference
+        click.echo(f"\nChunked inference with {vc.name} (sections: {sections})...")
+        import tempfile
+        import time
+
+        from mdt.vc.chunked_infer import chunked_inference
+
+        def _infer_fn(inp, outp, **params):
+            vc.infer(
+                profile_dir=profile_dir,
+                source_vocals=P(inp),
+                output_path=P(outp),
+                pitch_shift=pitch_shift,
+                **params,
+            )
+
+        t0 = time.time()
+        chunked_inference(
+            source_vocals_path=str(vocals_path),
+            sections_path=sections,
+            infer_fn=_infer_fn,
+            output_path=str(converted_path),
+        )
+        elapsed = time.time() - t0
+        click.echo(f"Chunked conversion done in {elapsed:.1f}s")
+    else:
+        click.echo(f"\nConverting vocals with {vc.name}...")
+        result = vc.infer(
+            profile_dir=profile_dir,
+            source_vocals=vocals_path,
+            output_path=converted_path,
+            pitch_shift=pitch_shift,
+        )
+        click.echo(f"Conversion done in {result.infer_time_seconds:.1f}s")
+
+    # Mix with instrumentals
+    if not vocals_only and stems_dir:
+        click.echo("\nMixing with instrumentals...")
+        from mdt.vc.mixer import mix_with_stems
+        mix_with_stems(
+            vocals_path=str(converted_path),
+            stems_dir=stems_dir,
+            output_path=output,
+            reference_vocals_path=str(vocals_path),
+        )
+        click.echo(f"Saved: {output}")
+    else:
+        click.echo(f"Saved: {converted_path}")
+
+
+# ────────────────────────────────────────────────────────────────
+# mdt benchmark — Compare backends
+# ────────────────────────────────────────────────────────────────
+
+@main.command()
+@click.argument("profile_name")
+@click.argument("song", type=click.Path(exists=True))
+@click.option("-o", "--output-dir", default="benchmark",
+              help="Output directory for benchmark results.")
+@click.option("--stems-dir", default=None, type=click.Path(),
+              help="Pre-separated stems directory.")
+@click.option("--sections", default=None, type=click.Path(exists=True),
+              help="Song sections JSON for per-section evaluation.")
+def benchmark(profile_name, song, output_dir, stems_dir, sections):
+    """Benchmark all trained backends for a profile on a song.
+
+    Runs inference with each backend and compares speaker similarity,
+    pitch accuracy, and artifact levels.
+
+    Example:
+
+        mdt benchmark my_voice suno_song.wav -o ./bench/ --sections song_sections.json
+    """
+    from pathlib import Path as P
+
+    from mdt.profiles.manager import load_profile, get_profile_dir
+    from mdt.vc.metrics import evaluate
+    from mdt.vc.registry import get_backend
+
+    click.echo("=" * 60)
+    click.echo("  Million Dollar Tuner — Backend Benchmark")
+    click.echo("=" * 60)
+
+    meta = load_profile(profile_name)
+    profile_dir = get_profile_dir(profile_name)
+    output_dir = P(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Get reference audio
+    ref_audio = profile_dir / "reference_audio.wav"
+
+    # Separate stems
+    if stems_dir:
+        vocals_path = P(stems_dir) / "vocals.wav"
+    else:
+        click.echo("\nSeparating stems...")
+        from mdt.separation.separator import separate as do_separate
+        stems = do_separate(audio_path=song, output_dir=str(output_dir / "stems"))
+        vocals_path = P(stems.vocals_path)
+
+    # Run each trained backend
+    results = {}
+    for bname, bstatus in meta.backends.items():
+        if not bstatus.trained:
+            click.echo(f"\n--- {bname}: not trained, skipping ---")
+            continue
+
+        click.echo(f"\n--- {bname}: running inference ---")
+        try:
+            vc = get_backend(bname)
+            out_path = output_dir / f"{bname}_vocals.wav"
+
+            result = vc.infer(
+                profile_dir=profile_dir,
+                source_vocals=vocals_path,
+                output_path=out_path,
+            )
+            click.echo(f"  Done in {result.infer_time_seconds:.1f}s")
+
+            # Evaluate
+            click.echo("  Evaluating...")
+            eval_result = evaluate(
+                str(ref_audio), str(vocals_path), str(out_path)
+            )
+            results[bname] = {
+                "sim_to_user": eval_result.sim_to_user,
+                "f0_correlation": eval_result.f0_correlation,
+                "output": str(out_path),
+            }
+            click.echo(f"  Speaker similarity: {eval_result.sim_to_user:.4f}")
+            click.echo(f"  F0 correlation: {eval_result.f0_correlation:.4f}")
+
+        except Exception as e:
+            click.echo(f"  ERROR: {e}")
+            results[bname] = {"error": str(e)}
+
+    # Section-level evaluation if sections provided
+    if sections:
+        click.echo("\n--- Section-level evaluation ---")
+        from mdt.vc.section_eval import evaluate_sections, print_report, save_report
+
+        for bname, r in results.items():
+            if "error" in r:
+                continue
+            report = evaluate_sections(
+                user_audio_path=str(ref_audio),
+                source_vocals_path=str(vocals_path),
+                converted_vocals_path=r["output"],
+                sections_path=sections,
+                model_name=bname,
+            )
+            print_report(report)
+            save_report(report, output_dir / f"section_report_{bname}.json")
+
+    # Summary
+    click.echo(f"\n{'='*60}")
+    click.echo(f"  {'Backend':<12} {'→User':>8} {'F0corr':>8}")
+    click.echo(f"  {'-'*28}")
+    for bname, r in results.items():
+        if "error" in r:
+            click.echo(f"  {bname:<12} {'ERROR':>8}")
+        else:
+            click.echo(f"  {bname:<12} {r['sim_to_user']:>8.4f} {r['f0_correlation']:>8.4f}")
+
+    import json
+    with open(output_dir / "benchmark_results.json", "w") as f:
+        json.dump(results, f, indent=2, default=str)
+    click.echo(f"\nResults saved to {output_dir}")
+
+
 if __name__ == "__main__":
     main()

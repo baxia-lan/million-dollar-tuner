@@ -41,3 +41,17 @@ Thumbs.db
 # Torch model cache
 .cache/
 pretrained/
+
+# Experiment artifacts (large dirs from training/inference)
+checkpoints/
+dataset/
+filelists/
+lib/
+logs/
+output/
+stems_*/
+bin/
+configs/
+pyvenv.cfg
+sovits_workdir/
+sovits_17min/
